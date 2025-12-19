@@ -1,0 +1,16 @@
+{
+  "experiment_id": "csnet_xca_gaussian_20251216_210920",
+  "status": "completed",
+  "final_metrics": {
+    "val/loss": 0.19488078355789185,
+    "val/dice": 0.7492544651031494,
+    "val/iou": 0.8412904739379883,
+    "val/precision": 0.943930983543396,
+    "val/recall": 0.8781367540359497,
+    "val/specificity": 0.8781367540359497,
+    "val/betti_0_error": 34.29999923706055,
+    "val/betti_1_error": 145.60000610351562,
+    "val/cldice": 0.7776007652282715
+  },
+  "best_checkpoint": "experiments/csnet/xca/csnet_xca_gaussian_20251216_210920/checkpoints/best.ckpt"
+}

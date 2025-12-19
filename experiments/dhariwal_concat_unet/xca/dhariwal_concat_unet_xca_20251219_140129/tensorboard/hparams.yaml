@@ -1,0 +1,55 @@
+arch_name: dhariwal_concat_unet
+image_size: 320
+patch_plan:
+- - 320
+  - 1
+dim: 32
+timesteps: 30
+sigma: 0.25
+learning_rate: 0.0002
+weight_decay: 1.0e-05
+num_classes: 2
+experiment_name: flow_model_sauna
+num_ensemble: 5
+data_name: xca
+log_image_enabled: false
+log_image_names:
+- 0000.png
+- 0010.png
+- 0019.png
+model_channels: 32
+channel_mult:
+- 1
+- 2
+- 4
+- 8
+channel_mult_emb: 4
+num_blocks: 3
+attn_resolutions:
+- 16
+- 16
+- 8
+- 8
+dropout: 0.0
+label_dim: 0
+augment_dim: 0
+loss_type: l2
+bce_weight: 0.5
+l2_weight: 0.1
+dice_weight: 0.2
+loss:
+  name: flow_reg_dice
+  params:
+    base: l1
+    dice_lambda: 0.1
+    threshold: 0.5
+    dice_pred_mode: hard_ste
+train_dir: data/xca_full/train
+val_dir: data/xca_full/val
+test_dir: data/xca_full/test
+crop_size: 320
+train_bs: 8
+num_samples_per_image: 4
+name: xca
+label_subdir: label
+use_sauna_transform: true

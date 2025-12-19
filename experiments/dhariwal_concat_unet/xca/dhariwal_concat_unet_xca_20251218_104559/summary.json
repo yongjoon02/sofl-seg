@@ -1,0 +1,16 @@
+{
+  "experiment_id": "dhariwal_concat_unet_xca_20251218_104559",
+  "status": "completed",
+  "final_metrics": {
+    "val/reconstruction_loss": 0.049800653010606766,
+    "val/dice": 0.7954501509666443,
+    "val/iou": 0.8689327239990234,
+    "val/precision": 0.9394879341125488,
+    "val/recall": 0.9144474267959595,
+    "val/specificity": 0.9144474267959595,
+    "val/betti_0_error": 7.449999809265137,
+    "val/betti_1_error": 88.25,
+    "val/cldice": 0.8341989517211914
+  },
+  "best_checkpoint": "experiments/dhariwal_concat_unet/xca/dhariwal_concat_unet_xca_20251218_104559/checkpoints/best.ckpt"
+}

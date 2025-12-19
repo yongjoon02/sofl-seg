@@ -1,0 +1,16 @@
+{
+  "experiment_id": "dscnet_octa500_6m_20251205_130250",
+  "status": "completed",
+  "final_metrics": {
+    "val/loss": 0.055931203067302704,
+    "val/dice": 0.872010350227356,
+    "val/iou": 0.8794302940368652,
+    "val/precision": 0.9302452206611633,
+    "val/recall": 0.9366894960403442,
+    "val/specificity": 0.9366894960403442,
+    "val/betti_0_error": 57.0,
+    "val/betti_1_error": 68.0,
+    "val/cldice": 0.8956730961799622
+  },
+  "best_checkpoint": "experiments/dscnet/octa500_6m/dscnet_octa500_6m_20251205_130250/checkpoints/best.ckpt"
+}

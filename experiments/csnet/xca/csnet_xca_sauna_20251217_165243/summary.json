@@ -1,0 +1,16 @@
+{
+  "experiment_id": "csnet_xca_sauna_20251217_165243",
+  "status": "completed",
+  "final_metrics": {
+    "val/loss": 0.23613619804382324,
+    "val/dice": 0.7323390245437622,
+    "val/iou": 0.8260776400566101,
+    "val/precision": 0.9017122983932495,
+    "val/recall": 0.8953819274902344,
+    "val/specificity": 0.8953819274902344,
+    "val/betti_0_error": 47.79999923706055,
+    "val/betti_1_error": 141.1999969482422,
+    "val/cldice": 0.7777063250541687
+  },
+  "best_checkpoint": "experiments/csnet/xca/csnet_xca_sauna_20251217_165243/checkpoints/best.ckpt"
+}

@@ -1,0 +1,32 @@
+# ROSSA 데이터셋 - DSCNet 학습 설정
+model:
+  arch_name: dscnet
+  in_channels: 1
+  num_classes: 2
+  image_size: 224
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  log_image_enabled: true
+  log_image_names:
+    - '201.png'
+    - '205.png'
+    - '210.png'
+
+data:
+  name: rossa
+  train_manual_dir: data/ROSSA/train_manual
+  train_sam_dir: data/ROSSA/train_sam
+  val_dir: data/ROSSA/val
+  test_dir: data/ROSSA/test
+  crop_size: 224
+  train_bs: 32
+  num_workers: 8
+  use_sam: false  # true: SAM-annotated 데이터 포함 (618 images)
+
+trainer:
+  max_epochs: 300
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+  log_every_n_steps: 50
+  check_val_every_n_epoch: 5

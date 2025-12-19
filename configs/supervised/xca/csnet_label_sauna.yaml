@@ -1,0 +1,40 @@
+# XCA 데이터셋 - CSNet + SAUNA Transform 학습 설정
+tag: sauna
+
+model:
+  arch_name: csnet
+  in_channels: 1
+  learning_rate: 0.0002
+  weight_decay: 0.00001
+  num_classes: 2
+  soft_label: true
+  loss_type: l2_dice_reg
+  params:
+      dice_lambda: 0.2      # λ
+      threshold: 0.5        # τ
+      dice_pred_mode: hard_ste  # hard / soft / hard_ste
+  log_image_enabled: true
+  log_image_names:
+    - '0000.png'
+    - '0010.png'
+    - '0019.png'
+
+data:
+  name: xca
+  train_dir: data/xca_full/train
+  val_dir: data/xca_full/val
+  test_dir: data/xca_full/test
+  crop_size: 320
+  train_bs: 8 # Match Smooth/Gaussian for fair comparison
+  num_samples_per_image: 8
+  label_subdir: label_sauna
+
+trainer:
+  max_epochs: 400
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed  # Match Smooth/Gaussian for fair comparison
+  log_every_n_steps: 10
+  check_val_every_n_epoch: 20
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 4

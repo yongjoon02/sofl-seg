@@ -1,0 +1,15 @@
+{
+  "experiment_id": "medsegdiff_octa500_6m_20251205_130252",
+  "status": "completed",
+  "final_metrics": {
+    "val/dice": 0.8671821355819702,
+    "val/iou": 0.8743807673454285,
+    "val/precision": 0.9361053705215454,
+    "val/recall": 0.9247918128967285,
+    "val/specificity": 0.9247918128967285,
+    "val/betti_0_error": 21.850000381469727,
+    "val/betti_1_error": 49.70000076293945,
+    "val/cldice": 0.8928829431533813
+  },
+  "best_checkpoint": "experiments/medsegdiff/octa500_6m/medsegdiff_octa500_6m_20251205_130252/checkpoints/best.ckpt"
+}

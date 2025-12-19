@@ -1,0 +1,16 @@
+{
+  "experiment_id": "csnet_xca_20251217_101702",
+  "status": "completed",
+  "final_metrics": {
+    "val/loss": 0.07804842293262482,
+    "val/dice": 0.7434130907058716,
+    "val/iou": 0.8406702280044556,
+    "val/precision": 0.9339219927787781,
+    "val/recall": 0.8857463002204895,
+    "val/specificity": 0.8857463002204895,
+    "val/betti_0_error": 66.80000305175781,
+    "val/betti_1_error": 115.4000015258789,
+    "val/cldice": 0.7842349410057068
+  },
+  "best_checkpoint": "experiments/csnet/xca/csnet_xca_20251217_101702/checkpoints/best.ckpt"
+}

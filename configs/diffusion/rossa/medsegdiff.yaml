@@ -1,0 +1,43 @@
+# ROSSA 데이터셋 - MedSegDiff 학습 설정
+model:
+  arch_name: medsegdiff
+  image_size: 224
+  dim: 64
+  timesteps: 100
+  learning_rate: 0.0002
+  weight_decay: 0.00001
+  num_classes: 2
+  use_ema: true
+  ema_decay: 0.9999
+  num_ensemble: 1
+  soft_label_type: none
+  soft_label_cache: true
+  soft_label_fg_max: 11
+  soft_label_thickness_max: 13
+  soft_label_kernel_ratio: 0.1
+  log_image_enabled: true
+  log_image_names:
+    - '201.png'
+    - '205.png'
+    - '210.png'
+
+data:
+  name: rossa
+  train_manual_dir: data/ROSSA/train_manual
+  train_sam_dir: data/ROSSA/train_sam
+  val_dir: data/ROSSA/val
+  test_dir: data/ROSSA/test
+  crop_size: 224
+  train_bs: 8
+  num_workers: 8
+  use_sam: false  # true: SAM-annotated 데이터 포함
+
+trainer:
+  max_epochs: 500
+  accelerator: gpu
+  devices: 1
+  precision: 32-true  # Diffusion은 FP32 필요
+  log_every_n_steps: 50
+  check_val_every_n_epoch: 10
+  accumulate_grad_batches: 2
+  gradient_clip_val: 1.0

@@ -1,0 +1,47 @@
+model:
+  arch_name: berdiff
+  image_size: 320
+  dim: 64
+  timesteps: 50
+  learning_rate: 0.0002
+  weight_decay: 1.0e-05
+  experiment_name: berdiff
+  data_name: xca
+  num_ensemble: 5
+  use_ema: true
+  ema_decay: 0.9999
+  log_image_enabled: true
+  log_image_names:
+  - 00036.png
+  - 00050.png
+  - 00063.png
+data:
+  name: xca
+  train_dir: data/xca_full/train
+  val_dir: data/xca_full/val
+  test_dir: data/xca_full/test
+  crop_size: 320
+  train_bs: 4
+  num_samples_per_image: 16
+trainer:
+  max_epochs: 500
+  accelerator: gpu
+  devices: 1
+  precision: 32-true
+  enable_progress_bar: false
+  check_val_every_n_epoch: 25
+  accumulate_grad_batches: 2
+  gradient_clip_val: 1.0
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      monitor: val/dice
+      mode: max
+      save_last: true
+      verbose: true
+  logger:
+    class_path: lightning.pytorch.loggers.TensorBoardLogger
+    init_args:
+      save_dir: lightning_logs
+      name: xca_diffusion
+      version: berdiff
