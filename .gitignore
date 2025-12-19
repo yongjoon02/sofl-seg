@@ -1,0 +1,115 @@
+# YoYo AI version control directory
+.yoyo/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.conda/
+
+# UV package manager
+uv.lock
+
+# PyTorch model files
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# OS
+.DS_Store
+Thumbs.db
+*.bak
+
+# Training logs
+logs/
+*.log
+
+# Lightning logs and checkpoints
+lightning_logs/
+wandb/
+
+# Experiment results
+results/
+outputs/
+checkpoints/
+predictions/
+visualization/
+
+# MLflow
+mlruns/
+mlflow.db
+*.db
+
+# OCTA datasets (large binary images)
+data/OCTA500_3M/
+data/OCTA500_6M/
+data/raw/
+
+# Data files
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.bmp
+*.png
+*.jpg
+*.jpeg
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+output_file.txt
+
+# Cache
+.cache/
+*.cache
+.pytest_cache/
+.mypy_cache/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover

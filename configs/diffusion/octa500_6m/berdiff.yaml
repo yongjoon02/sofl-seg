@@ -1,0 +1,37 @@
+# OCTA500 6M 데이터셋 - BerDiff (Bernoulli Diffusion) 학습 설정
+model:
+  arch_name: berdiff
+  image_size: 224
+  dim: 64
+  timesteps: 100
+  learning_rate: 0.0002
+  weight_decay: 0.00001
+  experiment_name: berdiff
+  data_name: octa500_6m
+  num_ensemble: 5
+  use_ema: true
+  ema_decay: 0.9999
+  log_image_enabled: true
+  log_image_names:
+    - '10181.bmp'
+    - '10185.bmp'
+    - '10190.bmp'
+
+data:
+  name: octa500_6m
+  train_dir: data/OCTA500_6M/train
+  val_dir: data/OCTA500_6M/val
+  test_dir: data/OCTA500_6M/test
+  crop_size: 224
+  train_bs: 4
+  num_samples_per_image: 16
+
+trainer:
+  max_epochs: 500
+  accelerator: gpu
+  devices: 1
+  precision: 32-true  # Binomial distribution은 FP32 필요
+  enable_progress_bar: false
+  check_val_every_n_epoch: 25
+  accumulate_grad_batches: 2
+  gradient_clip_val: 1.0

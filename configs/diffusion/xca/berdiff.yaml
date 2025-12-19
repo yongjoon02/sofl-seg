@@ -1,0 +1,37 @@
+# XCA 데이터셋 - BerDiff (Bernoulli Diffusion) 학습 설정
+model:
+  arch_name: berdiff
+  image_size: 320
+  dim: 64
+  timesteps: 100
+  learning_rate: 0.0002
+  weight_decay: 0.00001
+  experiment_name: berdiff
+  data_name: xca
+  num_ensemble: 5
+  use_ema: true
+  ema_decay: 0.9999
+  log_image_enabled: true
+  log_image_names:
+    - '0000.png'
+    - '0010.png'
+    - '0019.png'
+
+data:
+  name: xca
+  train_dir: data/xca_full/train
+  val_dir: data/xca_full/val
+  test_dir: data/xca_full/test
+  crop_size: 320
+  train_bs: 4
+  num_samples_per_image: 16
+
+trainer:
+  max_epochs: 500
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+  enable_progress_bar: false
+  check_val_every_n_epoch: 25
+  accumulate_grad_batches: 2
+  gradient_clip_val: 1.0
