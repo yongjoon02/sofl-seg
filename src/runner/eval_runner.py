@@ -168,16 +168,17 @@ class EvalRunner:
         print(f"   Checkpoint: {checkpoint_path}")
 
         try:
-            # Load model based on task type
+            # Load model based on task type (allow full checkpoint load for PyTorch 2.6+)
+            weights_only = False
             if model_info.task == 'supervised':
                 from src.archs.supervised_model import SupervisedModel
-                model = SupervisedModel.load_from_checkpoint(str(checkpoint_path))
-            elif model_info.name in ['dhariwal_concat_unet', 'dhariwal_unet_4channel']:
+                model = SupervisedModel.load_from_checkpoint(str(checkpoint_path), weights_only=weights_only)
+            elif model_info.task == 'flow':
                 from src.archs.flow_model import FlowModel
-                model = FlowModel.load_from_checkpoint(str(checkpoint_path))
+                model = FlowModel.load_from_checkpoint(str(checkpoint_path), weights_only=weights_only)
             else:  # diffusion
                 from src.archs.diffusion_model import DiffusionModel
-                model = DiffusionModel.load_from_checkpoint(str(checkpoint_path))
+                model = DiffusionModel.load_from_checkpoint(str(checkpoint_path), weights_only=weights_only)
 
             # Extract label_subdir from checkpoint config if available
             label_subdir = None

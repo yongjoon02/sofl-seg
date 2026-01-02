@@ -119,9 +119,11 @@ def list_models(task: Optional[str] = None) -> List[str]:
 def _register_builtin_models():
     """Register built-in models. Called on first access."""
     from src.archs.components import CSNet, DSCNet
-    from src.archs.components.unet import DhariwalConcatUNet
+    from src.archs.components.unet import DhariwalConcatUNet, DhariwalConcatUNetMultiHead
+    from src.archs.components.medsegdiff_flow import MedSegDiffFlow
+    from src.archs.components.segdiff_flow import SegDiffFlow
     from src.archs.components.binomial_diffusion import create_berdiff
-    from src.archs.components.gaussian_diffusion import create_medsegdiff
+    from src.archs.components.gaussian_diffusion import create_medsegdiff, create_segdiff
     
     # CSNet
     if 'csnet' not in MODEL_REGISTRY:
@@ -170,6 +172,22 @@ def _register_builtin_models():
                 'default_epochs': 500,
             }
         )
+
+    # SegDiff
+    if 'segdiff' not in MODEL_REGISTRY:
+        MODEL_REGISTRY.register(
+            name='segdiff',
+            obj=create_segdiff,
+            metadata={
+                'task': 'diffusion',
+                'params': 16_000_000,
+                'speed': 'slow',
+                'description': 'SegDiff with RRDB conditioning (Gaussian DDPM)',
+                'paper_url': None,
+                'default_lr': 2e-4,
+                'default_epochs': 500,
+            }
+        )
     
     # BerDiff
     if 'berdiff' not in MODEL_REGISTRY:
@@ -197,6 +215,54 @@ def _register_builtin_models():
                 'params': 20_000_000,
                 'speed': 'slow',
                 'description': 'Dhariwal UNet with concat conditioning (Flow Matching)',
+                'paper_url': None,
+                'default_lr': 2e-4,
+                'default_epochs': 500,
+            }
+        )
+
+    # Dhariwal Concat UNet Multi-head (Flow)
+    if 'dhariwal_concat_unet_multihead' not in MODEL_REGISTRY:
+        MODEL_REGISTRY.register(
+            name='dhariwal_concat_unet_multihead',
+            obj=DhariwalConcatUNetMultiHead,
+            metadata={
+                'task': 'flow',
+                'params': 20_000_000,
+                'speed': 'slow',
+                'description': 'Dhariwal UNet concat conditioning with flow+geometry heads',
+                'paper_url': None,
+                'default_lr': 2e-4,
+                'default_epochs': 500,
+            }
+        )
+
+    # MedSegDiff Flow backbone (Flow)
+    if 'medsegdiff_flow' not in MODEL_REGISTRY:
+        MODEL_REGISTRY.register(
+            name='medsegdiff_flow',
+            obj=MedSegDiffFlow,
+            metadata={
+                'task': 'flow',
+                'params': 25_000_000,
+                'speed': 'slow',
+                'description': 'MedSegDiff UNet backbone for flow matching (flow head only)',
+                'paper_url': None,
+                'default_lr': 2e-4,
+                'default_epochs': 500,
+            }
+        )
+
+    # SegDiff Flow backbone (Flow)
+    if 'segdiff_flow' not in MODEL_REGISTRY:
+        MODEL_REGISTRY.register(
+            name='segdiff_flow',
+            obj=SegDiffFlow,
+            metadata={
+                'task': 'flow',
+                'params': 25_000_000,
+                'speed': 'slow',
+                'description': 'SegDiff UNet backbone for flow matching (flow head only)',
                 'paper_url': None,
                 'default_lr': 2e-4,
                 'default_epochs': 500,

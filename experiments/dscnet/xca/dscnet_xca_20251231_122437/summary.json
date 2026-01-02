@@ -1,0 +1,16 @@
+{
+  "experiment_id": "dscnet_xca_20251231_122437",
+  "status": "completed",
+  "final_metrics": {
+    "val/loss": 0.09640724956989288,
+    "val/dice": 0.7539916634559631,
+    "val/iou": 0.8506162762641907,
+    "val/precision": 0.9357163310050964,
+    "val/recall": 0.8955371975898743,
+    "val/specificity": 0.8955371975898743,
+    "val/betti_0_error": 34.95000076293945,
+    "val/betti_1_error": 114.75,
+    "val/cldice": 0.800507664680481
+  },
+  "best_checkpoint": "experiments/dscnet/xca/dscnet_xca_20251231_122437/checkpoints/best.ckpt"
+}

@@ -14,9 +14,15 @@ Common components used by models:
 from .csnet import CSNet
 from .dscnet import DSCNet
 from . import unet  # Register flow matching architectures
+from . import medsegdiff_flow  # Register MedSegDiff-based flow backbone
+from . import segdiff_flow  # Register SegDiff-based flow backbone
+from . import nnunet_model  # Register nnUNet-style supervised backbone
 
 __all__ = [
     'CSNet',
     'DSCNet',
     'unet',
+    'medsegdiff_flow',
+    'segdiff_flow',
+    'nnunet_model',
 ]

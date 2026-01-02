@@ -45,6 +45,7 @@ class DiffusionModel(L.LightningModule):
         soft_label_kernel_ratio: float = 0.1,
         log_image_enabled: bool = False,
         log_image_names: list = None,
+        loss_type: str = 'hybrid',
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -70,7 +71,12 @@ class DiffusionModel(L.LightningModule):
             raise ValueError(f"Unknown architecture: {arch_name}. Choose from {list(GLOBAL_MODEL_REGISTRY.keys())}")
 
         create_fn = GLOBAL_MODEL_REGISTRY.get(arch_name)
-        self.diffusion_model = create_fn(image_size=image_size, dim=dim, timesteps=timesteps)
+        self.diffusion_model = create_fn(
+            image_size=image_size,
+            dim=dim,
+            timesteps=timesteps,
+            loss_type=loss_type,
+        )
 
         # EMA model for stable inference
         self.use_ema = use_ema

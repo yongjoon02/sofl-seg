@@ -46,4 +46,5 @@ trainer:
   enable_progress_bar: false
   check_val_every_n_epoch: 25
   accumulate_grad_batches: 8  # 실효 배치: 6 GPU × 1 × 8 = 48
+  log_every_n_steps: 10
   gradient_clip_val: 1.0

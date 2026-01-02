@@ -13,6 +13,7 @@ Based on HiDiff implementation but without prior segmentation.
 from collections import namedtuple
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.distributions.binomial import Binomial
 
@@ -158,10 +159,11 @@ class BinomialDiffusionModel(GaussianDiffusionModel):
                  objective='predict_x0', beta_schedule='cosine', loss_type='nll'):
         super().__init__(model, timesteps, sampling_timesteps, objective, beta_schedule)
 
-        self.loss_type = loss_type  # 'nll' or 'hybrid'
+        self.loss_type = loss_type  # 'nll', 'hybrid', or 'mse_dice'
 
         # Loss functions for hybrid mode
         self.focal_dice_loss = FocalDiceLoss(wf=0.1, wd=0.9, gamma=2.0)
+        self.dice_loss = DiceLoss()
 
         # Additional buffers for Binomial diffusion
         # alphas (not cumprod) needed for posterior
@@ -268,6 +270,10 @@ class BinomialDiffusionModel(GaussianDiffusionModel):
         elif self.loss_type == 'hybrid':
             # Hybrid: Focal + Dice (CrackSegDiff style for Binomial)
             loss = self.focal_dice_loss(pred_x_start, img)
+        elif self.loss_type == 'mse_dice':
+            mse_loss = F.mse_loss(pred_x_start, img)
+            dice_loss = self.dice_loss(pred_x_start, img)
+            loss = mse_loss + dice_loss
 
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
@@ -338,7 +344,7 @@ def create_berdiff(image_size=224, dim=64, timesteps=1000, loss_type='hybrid'):
         image_size: Input image size (default: 224)
         dim: Base dimension (default: 64)
         timesteps: Number of diffusion steps (default: 1000)
-        loss_type: 'hybrid' (default: focal+dice), 'mix', 'nll', 'focal', or 'kl'
+        loss_type: 'hybrid' (default: focal+dice), 'mse_dice', or 'nll'
     """
     unet = SimpleConcatUNet(
         dim=dim,

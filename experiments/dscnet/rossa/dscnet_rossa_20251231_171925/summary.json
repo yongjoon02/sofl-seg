@@ -1,0 +1,16 @@
+{
+  "experiment_id": "dscnet_rossa_20251231_171925",
+  "status": "completed",
+  "final_metrics": {
+    "val/loss": 0.07369539141654968,
+    "val/dice": 0.8997256755828857,
+    "val/iou": 0.9023292660713196,
+    "val/precision": 0.9513092041015625,
+    "val/recall": 0.9417293071746826,
+    "val/specificity": 0.9417293071746826,
+    "val/betti_0_error": 74.58999633789062,
+    "val/betti_1_error": 64.61000061035156,
+    "val/cldice": 0.9170880913734436
+  },
+  "best_checkpoint": "experiments/dscnet/rossa/dscnet_rossa_20251231_171925/checkpoints/best.ckpt"
+}

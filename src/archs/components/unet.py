@@ -379,6 +379,70 @@ class DhariwalConcatUNet(torch.nn.Module):
 
 
 #----------------------------------------------------------------------------
+# Conditional Diffusion style UNet (Simple Concat, Multi-head)
+@ARCHS_REGISTRY.register(name="dhariwal_concat_unet_multihead")
+class DhariwalConcatUNetMultiHead(torch.nn.Module):
+    """Dhariwal UNet with simple concat conditioning and multi-head outputs.
+
+    Input: concat([x, cond]) where x is noisy mask and cond is condition image
+    Output: 2 channels -> [flow_v, geometry_pred]
+    """
+
+    def __init__(
+        self,
+        img_resolution,                     # Image resolution at input/output.
+        mask_channels       = 1,            # Number of mask channels.
+        input_img_channels  = 2,            # Number of condition image channels.
+        label_dim           = 0,            # Number of class labels, 0 = unconditional.
+        augment_dim         = 0,            # Augmentation label dimensionality, 0 = no augmentation.
+        model_channels      = 192,          # Base multiplier for the number of channels.
+        channel_mult        = [1, 2, 3, 4],  # Per-resolution multipliers for the number of channels.
+        channel_mult_emb    = 4,            # Multiplier for the dimensionality of the embedding vector.
+        num_blocks          = 3,            # Number of residual blocks per resolution.
+        attn_resolutions    = [32, 16, 8],  # List of resolutions with self-attention.
+        dropout             = 0.10,         # List of resolutions with self-attention.
+        label_dropout       = 0,            # Dropout probability of class labels for classifier-free guidance.
+        out_channels        = 2,            # Output channels: flow + geometry head
+    ):
+        super().__init__()
+        # Concat input: mask + condition image
+        self.base_unet = DhariwalUNet(
+            img_resolution=img_resolution,
+            in_channels=mask_channels + input_img_channels,  # concat([x, cond])
+            out_channels=out_channels,  # output [flow, geometry]
+            label_dim=label_dim,
+            augment_dim=augment_dim,
+            model_channels=model_channels,
+            channel_mult=channel_mult,
+            channel_mult_emb=channel_mult_emb,
+            num_blocks=num_blocks,
+            attn_resolutions=attn_resolutions,
+            dropout=dropout,
+            label_dropout=label_dropout,
+        )
+
+    def forward(self, x, time, cond):
+        """
+        Forward pass with condition concatenation.
+
+        Args:
+            x: Noisy mask tensor (B, mask_channels, H, W)
+            time: Time embedding (B,) - noise_labels
+            cond: Condition image tensor (B, input_img_channels, H, W)
+
+        Returns:
+            Predicted outputs (B, 2, H, W) = [flow, geometry_pred]
+        """
+        # Concat noisy mask and condition image
+        x_concat = torch.cat([x, cond], dim=1)  # (B, mask_channels + input_img_channels, H, W)
+
+        # Process through base UNet (class_labels=None, augment_labels=None by default)
+        output = self.base_unet(x_concat, time, None)  # (B, 2, H, W)
+
+        return output
+
+
+#----------------------------------------------------------------------------
 # Patch Diffusion style UNet with coordinate passthrough
 class DhariwalUNetWithCoordinate(torch.nn.Module):
     """Patch Diffusion style UNet that passes coordinate through without processing.

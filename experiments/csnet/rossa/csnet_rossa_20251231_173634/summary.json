@@ -1,0 +1,16 @@
+{
+  "experiment_id": "csnet_rossa_20251231_173634",
+  "status": "completed",
+  "final_metrics": {
+    "val/loss": 0.1198795959353447,
+    "val/dice": 0.8902682662010193,
+    "val/iou": 0.8941208124160767,
+    "val/precision": 0.9460280537605286,
+    "val/recall": 0.9373173713684082,
+    "val/specificity": 0.9373173713684082,
+    "val/betti_0_error": 87.7699966430664,
+    "val/betti_1_error": 55.61000061035156,
+    "val/cldice": 0.9084674715995789
+  },
+  "best_checkpoint": "experiments/csnet/rossa/csnet_rossa_20251231_173634/checkpoints/best.ckpt"
+}

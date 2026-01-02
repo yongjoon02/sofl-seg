@@ -1,0 +1,15 @@
+{
+  "experiment_id": "berdiff_rossa_20251231_172315",
+  "status": "completed",
+  "final_metrics": {
+    "val/dice": 0.8275236487388611,
+    "val/iou": 0.8389842510223389,
+    "val/precision": 0.9309822916984558,
+    "val/recall": 0.8871991038322449,
+    "val/specificity": 0.8871991038322449,
+    "val/betti_0_error": 86.30000305175781,
+    "val/betti_1_error": 59.95000076293945,
+    "val/cldice": 0.8618786334991455
+  },
+  "best_checkpoint": "experiments/berdiff/rossa/berdiff_rossa_20251231_172315/checkpoints/best.ckpt"
+}

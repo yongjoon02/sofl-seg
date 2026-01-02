@@ -1,0 +1,16 @@
+{
+  "experiment_id": "nnunet_xca_20251229_173929",
+  "status": "completed",
+  "final_metrics": {
+    "val/loss": 0.09264595806598663,
+    "val/dice": 0.7271949648857117,
+    "val/iou": 0.8429255485534668,
+    "val/precision": 0.9333317875862122,
+    "val/recall": 0.8879674673080444,
+    "val/specificity": 0.8879674673080444,
+    "val/betti_0_error": 53.150001525878906,
+    "val/betti_1_error": 130.5500030517578,
+    "val/cldice": 0.7894535064697266
+  },
+  "best_checkpoint": "experiments/nnunet/xca/nnunet_xca_20251229_173929/checkpoints/best.ckpt"
+}

@@ -1,0 +1,56 @@
+# ROSSA 데이터셋 - Flow Matching (SegDiff backbone, SAUNA soft label)
+model:
+  arch_name: segdiff_flow
+  image_size: 224
+  patch_plan:
+    - [224, 1]
+  dim: 32
+  timesteps: 30
+  num_ensemble: 5
+  sigma: 0.25
+  learning_rate: 0.0002
+  weight_decay: 0.00001
+  num_classes: 2
+  experiment_name: flow_model_segdiff
+  data_name: rossa
+  log_image_enabled: false
+  log_image_names:
+    - '201.png'
+    - '205.png'
+    - '210.png'
+  # UNet architecture parameters (mapped to SegDiff backbone)
+  model_channels: 32
+  channel_mult: [1, 2, 4, 8]
+  channel_mult_emb: 4
+  num_blocks: 3
+  attn_resolutions: [16, 16, 8, 8]
+  dropout: 0.0
+  label_dim: 0
+  augment_dim: 0
+  # Loss configuration (flow matching base only; single-head model)
+  loss:
+    name: flow_matching
+    params:
+      scheme: l1
+
+data:
+  name: rossa
+  train_manual_dir: data/ROSSA/train_manual
+  train_sam_dir: data/ROSSA/train_sam
+  val_dir: data/ROSSA/val
+  test_dir: data/ROSSA/test
+  train_bs: 8
+  num_samples_per_image: 1
+  use_sam: false
+  use_sauna_transform: false
+
+trainer:
+  max_epochs: 500
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+  enable_progress_bar: true
+  check_val_every_n_epoch: 25
+  accumulate_grad_batches: 8
+  log_every_n_steps: 10
+  gradient_clip_val: 1.0
