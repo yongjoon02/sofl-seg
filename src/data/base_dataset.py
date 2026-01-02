@@ -20,6 +20,7 @@ from monai.transforms import (
     ScaleIntensityd,
 )
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
 # Field-specific scaling configuration
 FIELD_SCALE_CONFIG = {
@@ -345,7 +346,7 @@ class BaseOCTDataModule(L.LightningDataModule, ABC):
             num_samples_per_image=1  # val/test always use 1 sample
         )
 
-    def _create_dataloader(self, dataset, batch_size: int, shuffle: bool = False):
+    def _create_dataloader(self, dataset, batch_size: int, shuffle: bool = False, sampler=None):
         """
         Create DataLoader with common settings.
         
@@ -359,7 +360,8 @@ class BaseOCTDataModule(L.LightningDataModule, ABC):
         return DataLoader(
             dataset,
             batch_size=batch_size,
-            shuffle=shuffle,
+            shuffle=shuffle if sampler is None else False,
+            sampler=sampler,
             num_workers=16,  # Optimized for single GPU (too many workers can cause overhead)
             pin_memory=True,  # Enable for faster GPU transfer
             prefetch_factor=4,  # Prefetch more batches for better pipeline
@@ -368,7 +370,10 @@ class BaseOCTDataModule(L.LightningDataModule, ABC):
 
     def train_dataloader(self):
         """Return training DataLoader (shuffled)"""
-        return self._create_dataloader(self.train_dataset, self.train_bs, shuffle=True)
+        sampler = None
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            sampler = DistributedSampler(self.train_dataset, shuffle=True)
+        return self._create_dataloader(self.train_dataset, self.train_bs, shuffle=True, sampler=sampler)
 
     def val_dataloader(self):
         """Return validation DataLoader (not shuffled)

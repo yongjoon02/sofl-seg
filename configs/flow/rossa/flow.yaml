@@ -1,10 +1,9 @@
-# XCA 데이터셋 - Flow Matching 학습 설정
+# ROSSA 데이터셋 - Flow Matching 학습 설정
 model:
   arch_name: dhariwal_concat_unet
-  image_size: 320
+  image_size: 224
   patch_plan:
-    # (patch_size, num_patches): num_patches가 배치를 곱절로 늘리므로 OOM 방지를 위해 1로 제한
-    - [320, 1]
+    - [224, 1]
   dim: 32
   timesteps: 30
   num_ensemble: 5
@@ -13,12 +12,12 @@ model:
   weight_decay: 0.00001
   num_classes: 2
   experiment_name: flow_model
-  data_name: xca
+  data_name: rossa
   log_image_enabled: true
   log_image_names:
-    - '0000.png'
-    - '0010.png'
-    - '0019.png'
+    - '201.png'
+    - '205.png'
+    - '210.png'
   # UNet architecture parameters
   model_channels: 32
   channel_mult: [1, 2, 4, 8]
@@ -30,21 +29,22 @@ model:
   augment_dim: 0
 
 data:
-  name: xca
-  train_dir: data/xca_full/train
-  val_dir: data/xca_full/val
-  test_dir: data/xca_full/test
-  train_bs: 8  # DDP: 각 GPU당 1 → 총 6 GPU × 1 = 6
-  image_size: 320
-  num_samples_per_image: 4  # 메모리 최적화
+  name: rossa
+  train_manual_dir: data/ROSSA/train_manual
+  train_sam_dir: data/ROSSA/train_sam
+  val_dir: data/ROSSA/val
+  test_dir: data/ROSSA/test
+  train_bs: 8
+  num_samples_per_image: 1
+  use_sam: false
 
 trainer:
   max_epochs: 500
   accelerator: gpu
   devices: 1
   precision: 16-mixed
-  enable_progress_bar: false
+  enable_progress_bar: true
   check_val_every_n_epoch: 25
-  accumulate_grad_batches: 8  # 실효 배치: 6 GPU × 1 × 8 = 48
+  accumulate_grad_batches: 8
   log_every_n_steps: 10
   gradient_clip_val: 1.0

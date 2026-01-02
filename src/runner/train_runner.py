@@ -1,5 +1,6 @@
 """Training runner - config-based training logic."""
 
+import inspect
 import os
 from pathlib import Path
 from typing import Any, Dict
@@ -10,6 +11,8 @@ from lightning.pytorch.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint,
     StochasticWeightAveraging,
+    TQDMProgressBar,
+    Callback,
 )
 from lightning.pytorch.tuner import Tuner
 
@@ -21,6 +24,36 @@ from src.utils.config import save_config
 
 # Import data modules to register datasets
 import src.data  # noqa: F401
+
+
+class EpochSummaryLogger(Callback):
+    """Print compact epoch summaries (rank 0 only)."""
+
+    def __init__(self, max_epochs: int):
+        super().__init__()
+        self.max_epochs = max_epochs
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        if trainer.is_global_zero:
+            cur = trainer.current_epoch
+            print(f"[Epoch {cur}/{self.max_epochs}] start")
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        if trainer.is_global_zero:
+            cur = trainer.current_epoch
+            metrics = trainer.callback_metrics
+            # Extract a few common metrics if present
+            train_loss = metrics.get('train/loss')
+            val_dice = metrics.get('val/dice')
+            val_loss = metrics.get('val/loss')
+            parts = [f"[Epoch {cur}/{self.max_epochs}] done"]
+            if train_loss is not None:
+                parts.append(f"train/loss={float(train_loss):.4f}")
+            if val_loss is not None:
+                parts.append(f"val/loss={float(val_loss):.4f}")
+            if val_dice is not None:
+                parts.append(f"val/dice={float(val_dice):.4f}")
+            print(" | ".join(parts))
 
 
 def is_main_process() -> bool:
@@ -114,7 +147,12 @@ class TrainRunner:
             # Train
             if is_main_process():
                 print("Starting training...")
-            trainer.fit(model, datamodule, ckpt_path=self.resume)
+            # PyTorch 2.6+ defaults torch.load(weights_only=True); resume checkpoints
+            # often include non-weight objects. Allow full load when resuming.
+            weights_only = self.trainer_cfg.get('weights_only', None)
+            if weights_only is None and self.resume:
+                weights_only = False
+            trainer.fit(model, datamodule, ckpt_path=self.resume, weights_only=weights_only)
 
             # Finish experiment (only on main process)
             if is_main_process():
@@ -206,6 +244,7 @@ class TrainRunner:
     def _create_datamodule(self):
         """Create datamodule."""
         DataModuleClass = self.dataset_info.class_ref
+        params = set(inspect.signature(DataModuleClass.__init__).parameters)
 
         # Build kwargs based on dataset
         kwargs = {
@@ -223,8 +262,15 @@ class TrainRunner:
             kwargs['label_subdir'] = self.data_cfg['label_subdir']
         if 'use_sauna_transform' in self.data_cfg:
             kwargs['use_sauna_transform'] = self.data_cfg['use_sauna_transform']
+        if 'train_manual_dir' in self.data_cfg:
+            kwargs['train_manual_dir'] = self.data_cfg['train_manual_dir']
+        if 'train_sam_dir' in self.data_cfg:
+            kwargs['train_sam_dir'] = self.data_cfg['train_sam_dir']
+        if 'use_sam' in self.data_cfg:
+            kwargs['use_sam'] = self.data_cfg['use_sam']
 
-        return DataModuleClass(**kwargs)
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in params}
+        return DataModuleClass(**filtered_kwargs)
 
     def _create_model(self):
         """Create model."""
@@ -239,9 +285,8 @@ class TrainRunner:
             'num_classes': self.model_cfg.get('num_classes', 2),
         }
 
-        # FlowModel 지원: arch_name이 flow 계열이면 FlowModel 사용
-        flow_archs = ['dhariwal_concat_unet', 'dhariwal_unet_4channel']
-        if self.model_name in flow_archs:
+        # FlowModel 지원: registry task가 flow이면 FlowModel 사용
+        if self.model_info.task == 'flow':
             from src.archs.flow_model import FlowModel
             return FlowModel(
                 **common_args,
@@ -336,6 +381,7 @@ class TrainRunner:
                 num_ensemble=self.model_cfg.get('num_ensemble', 1),
                 log_image_enabled=self.model_cfg.get('log_image_enabled', False),
                 log_image_names=self.model_cfg.get('log_image_names', None),
+                loss_type=self.model_cfg.get('loss_type', 'hybrid'),
             )
 
     def _create_callbacks(self, exp_dir: Path):
@@ -358,6 +404,10 @@ class TrainRunner:
                     swa_lrs=self.model_cfg.get('learning_rate', 1e-4) / 10
                 )
             )
+
+        # Always add compact epoch summary logger (rank0 only).
+        max_epochs = self.trainer_cfg.get('max_epochs', 300)
+        callbacks.append(EpochSummaryLogger(max_epochs=max_epochs))
 
         return callbacks
 
@@ -391,14 +441,19 @@ class TrainRunner:
         
         strategy = os.environ.get('DDP_STRATEGY') or self.trainer_cfg.get('strategy', 'auto')
 
+        progress_bar = self.trainer_cfg.get('enable_progress_bar', False)
+        tqdm_refresh = self.trainer_cfg.get('progress_bar_refresh_rate', 0)
+
         return L.Trainer(
             max_epochs=self.trainer_cfg.get('max_epochs', 300),
             accelerator=self.trainer_cfg.get('accelerator', 'gpu'),
             devices=devices,
             strategy=strategy,
             precision=precision_str,
-            callbacks=callbacks,
+            callbacks=callbacks + ([TQDMProgressBar(refresh_rate=tqdm_refresh or 1)] if progress_bar else []),
             logger=logger,
+            use_distributed_sampler=False,
+            enable_progress_bar=progress_bar,
             log_every_n_steps=self.trainer_cfg.get('log_every_n_steps', 50),
             check_val_every_n_epoch=self.trainer_cfg.get('check_val_every_n_epoch', 5),
             gradient_clip_val=self.trainer_cfg.get('gradient_clip_val', None),

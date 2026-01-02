@@ -19,7 +19,7 @@
 
 set -e
 
-cd /home/yongjun/soft-seg
+cd /home/yongjun/sofl-seg
 source .venv/bin/activate
 export PYTHONUNBUFFERED=1  # 즉시 로그 flush
 
@@ -36,7 +36,7 @@ DDP_PRECISION="32-true"  # Default to FP32 for stability (can override with --pr
 LOG_SUFFIX=""  # 로그 파일명에 덧붙일 접미사 (예: _01, _02)
 
 # 모든 모델 목록
-ALL_MODELS=("csnet" "dscnet" "medsegdiff" "berdiff")
+ALL_MODELS=("csnet" "dscnet" "nnunet" "medsegdiff" "berdiff" "segdiff")
 
 # 인자 파싱
 while [[ $# -gt 0 ]]; do
@@ -100,7 +100,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --data, -d       Dataset (xca, octa500_3m, octa500_6m, rossa)"
-            echo "  --models, -m     Models (csnet,dscnet,medsegdiff,berdiff)"
+            echo "  --models, -m     Models (csnet,dscnet,nnunet,medsegdiff,berdiff,segdiff)"
             echo "  --gpus           GPU indices (comma-separated)"
             echo "  --config, -c     Single config file path"
             echo "  --gpu, -g        Single GPU index"
@@ -344,10 +344,10 @@ get_config() {
     local data=$2
     
     # Supervised models
-    if [[ "$model" == "csnet" || "$model" == "dscnet" ]]; then
+    if [[ "$model" == "csnet" || "$model" == "dscnet" || "$model" == "nnunet" ]]; then
         echo "configs/supervised/${data}/${model}.yaml"
     # Diffusion models
-    elif [[ "$model" == "medsegdiff" || "$model" == "berdiff" ]]; then
+    elif [[ "$model" == "medsegdiff" || "$model" == "berdiff" || "$model" == "segdiff" ]]; then
         echo "configs/diffusion/${data}/${model}.yaml"
     # Flow models
     elif [[ "$model" == "flow" || "$model" == "dhariwal_concat_unet" ]]; then

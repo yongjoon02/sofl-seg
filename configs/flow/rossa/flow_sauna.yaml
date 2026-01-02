@@ -1,9 +1,9 @@
-# XCA 데이터셋 - Flow Matching 학습 설정 (SAUNA soft label)
+# ROSSA 데이터셋 - Flow Matching 학습 설정 (SAUNA soft label)
 model:
   arch_name: dhariwal_concat_unet
-  image_size: 320
+  image_size: 224
   patch_plan:
-    - [320, 1]
+    - [224, 1]
   dim: 32
   timesteps: 30
   num_ensemble: 5
@@ -12,12 +12,12 @@ model:
   weight_decay: 0.00001
   num_classes: 2
   experiment_name: flow_model_sauna
-  data_name: xca
+  data_name: rossa
   log_image_enabled: false
   log_image_names:
-    - '0000.png'
-    - '0010.png'
-    - '0019.png'
+    - '201.png'
+    - '205.png'
+    - '210.png'
   # UNet architecture parameters
   model_channels: 32
   channel_mult: [1, 2, 4, 8]
@@ -34,15 +34,17 @@ model:
       scheme: l2_l1geo
       weights:
         l1geo: 0.1
+
 data:
-  name: xca
-  train_dir: data/xca_full/train
-  val_dir: data/xca_full/val
-  test_dir: data/xca_full/test
-  train_bs: 8  # DDP: 각 GPU당 1 → 총 6 GPU × 1 = 6
-  image_size: 320
-  num_samples_per_image: 4  # 메모리 최적화
-  use_sauna_transform: true  # Enable SAUNA dynamic transformation
+  name: rossa
+  train_manual_dir: data/ROSSA/train_manual
+  train_sam_dir: data/ROSSA/train_sam
+  val_dir: data/ROSSA/val
+  test_dir: data/ROSSA/test
+  train_bs: 8
+  num_samples_per_image: 1
+  use_sam: false
+  use_sauna_transform: true
 
 trainer:
   max_epochs: 500
@@ -51,6 +53,6 @@ trainer:
   precision: 16-mixed
   enable_progress_bar: true
   check_val_every_n_epoch: 25
-  accumulate_grad_batches: 8  # 실효 배치: 6 GPU × 1 × 8 = 48
+  accumulate_grad_batches: 8
   log_every_n_steps: 10
   gradient_clip_val: 1.0

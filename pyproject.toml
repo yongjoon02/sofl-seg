@@ -1,5 +1,5 @@
 [project]
-name = "diffusion-seg"
+name = "sofl_seg"
 version = "0.1.0"
 description = "Diffusion-based segmentation"
 readme = "README.md"

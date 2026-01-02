@@ -26,8 +26,14 @@ def load_tensorboard_logs(log_dir: Path) -> dict:
 def main():
     # Find all XCA experiment logs
     experiments_dir = Path("experiments")
-    models = ['csnet', 'dscnet', 'medsegdiff', 'berdiff']
-    colors = {'csnet': '#1f77b4', 'dscnet': '#ff7f0e', 'medsegdiff': '#2ca02c', 'berdiff': '#d62728'}
+    models = ['csnet', 'dscnet', 'medsegdiff', 'berdiff', 'segdiff']
+    colors = {
+        'csnet': '#1f77b4',
+        'dscnet': '#ff7f0e',
+        'medsegdiff': '#2ca02c',
+        'berdiff': '#d62728',
+        'segdiff': '#9467bd',
+    }
     
     # Load logs
     all_logs = {}

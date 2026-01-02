@@ -1,13 +1,12 @@
-# XCA 데이터셋 - BerDiff (Bernoulli Diffusion) 학습 설정
+# XCA 데이터셋 - SegDiff 학습 설정
 model:
-  arch_name: berdiff
+  arch_name: segdiff
   image_size: 320
   dim: 64
   timesteps: 100
-  loss_type: mse_dice
   learning_rate: 0.0002
   weight_decay: 0.00001
-  experiment_name: berdiff
+  experiment_name: segdiff
   data_name: xca
   num_ensemble: 5
   use_ema: true
@@ -17,6 +16,7 @@ model:
     - '0000.png'
     - '0010.png'
     - '0019.png'
+  loss_type: mse
 
 data:
   name: xca
@@ -31,7 +31,7 @@ trainer:
   max_epochs: 500
   accelerator: gpu
   devices: 1
-  precision: 32-true
+  precision: 16-mixed
   enable_progress_bar: true
   check_val_every_n_epoch: 25
   accumulate_grad_batches: 8

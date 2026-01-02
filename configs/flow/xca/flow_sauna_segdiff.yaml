@@ -1,9 +1,8 @@
-# XCA 데이터셋 - Flow Matching 학습 설정
+# XCA 데이터셋 - Flow Matching (SegDiff backbone, SAUNA soft label)
 model:
-  arch_name: dhariwal_concat_unet
+  arch_name: segdiff_flow
   image_size: 320
   patch_plan:
-    # (patch_size, num_patches): num_patches가 배치를 곱절로 늘리므로 OOM 방지를 위해 1로 제한
     - [320, 1]
   dim: 32
   timesteps: 30
@@ -12,14 +11,14 @@ model:
   learning_rate: 0.0002
   weight_decay: 0.00001
   num_classes: 2
-  experiment_name: flow_model
+  experiment_name: flow_model_segdiff
   data_name: xca
-  log_image_enabled: true
+  log_image_enabled: false
   log_image_names:
     - '0000.png'
     - '0010.png'
     - '0019.png'
-  # UNet architecture parameters
+  # UNet architecture parameters (mapped to SegDiff backbone)
   model_channels: 32
   channel_mult: [1, 2, 4, 8]
   channel_mult_emb: 4
@@ -28,6 +27,11 @@ model:
   dropout: 0.0
   label_dim: 0
   augment_dim: 0
+  # Loss configuration (flow matching base only; single-head model)
+  loss:
+    name: flow_matching
+    params:
+      scheme: l1
 
 data:
   name: xca
@@ -37,14 +41,18 @@ data:
   train_bs: 8  # DDP: 각 GPU당 1 → 총 6 GPU × 1 = 6
   image_size: 320
   num_samples_per_image: 4  # 메모리 최적화
+  use_sauna_transform: false  # Enable SAUNA dynamic transformation
 
 trainer:
   max_epochs: 500
   accelerator: gpu
   devices: 1
   precision: 16-mixed
-  enable_progress_bar: false
+  enable_progress_bar: true
   check_val_every_n_epoch: 25
   accumulate_grad_batches: 8  # 실효 배치: 6 GPU × 1 × 8 = 48
   log_every_n_steps: 10
   gradient_clip_val: 1.0
+
+
+#flow matching(seegdiff) base model 실험

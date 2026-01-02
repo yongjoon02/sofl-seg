@@ -15,7 +15,7 @@ model:
   soft_label_fg_max: 11
   soft_label_thickness_max: 13
   soft_label_kernel_ratio: 0.1
-  log_image_enabled: true
+  log_image_enabled: false 
   log_image_names:
     - '201.png'
     - '205.png'
@@ -29,7 +29,6 @@ data:
   test_dir: data/ROSSA/test
   crop_size: 224
   train_bs: 8
-  num_workers: 8
   use_sam: false  # true: SAM-annotated 데이터 포함
 
 trainer:
@@ -37,7 +36,7 @@ trainer:
   accelerator: gpu
   devices: 1
   precision: 32-true  # Diffusion은 FP32 필요
-  log_every_n_steps: 50
-  check_val_every_n_epoch: 10
-  accumulate_grad_batches: 2
+  log_every_n_steps: 10
+  check_val_every_n_epoch: 25
+  accumulate_grad_batches: 8
   gradient_clip_val: 1.0
