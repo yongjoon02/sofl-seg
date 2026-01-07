@@ -1,0 +1,15 @@
+{
+  "experiment_id": "medsegdiff_xca_20260105_165528",
+  "status": "completed",
+  "final_metrics": {
+    "val/dice": 0.7983709573745728,
+    "val/iou": 0.8699699640274048,
+    "val/precision": 0.9360837936401367,
+    "val/recall": 0.9190481305122375,
+    "val/specificity": 0.9190481305122375,
+    "val/betti_0_error": 17.549999237060547,
+    "val/betti_1_error": 89.30000305175781,
+    "val/cldice": 0.8354376554489136
+  },
+  "best_checkpoint": "experiments/medsegdiff/xca/medsegdiff_xca_20260105_165528/checkpoints/best.ckpt"
+}

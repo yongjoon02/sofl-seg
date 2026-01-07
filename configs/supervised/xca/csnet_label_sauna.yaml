@@ -25,7 +25,7 @@ data:
   val_dir: data/xca_full/val
   test_dir: data/xca_full/test
   crop_size: 320
-  train_bs: 8 # Match Smooth/Gaussian for fair comparison
+  train_bs: 6 # Match Smooth/Gaussian for fair comparison
   num_samples_per_image: 8
   label_subdir: label_sauna
 
@@ -33,8 +33,8 @@ trainer:
   max_epochs: 400
   accelerator: gpu
   devices: 1
-  precision: 16-mixed  # Match Smooth/Gaussian for fair comparison
+  precision: 32-true  # Match Smooth/Gaussian for fair comparison
   log_every_n_steps: 10
   check_val_every_n_epoch: 20
   gradient_clip_val: 1.0
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 8

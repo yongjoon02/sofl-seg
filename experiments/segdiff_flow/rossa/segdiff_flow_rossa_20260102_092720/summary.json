@@ -1,0 +1,16 @@
+{
+  "experiment_id": "segdiff_flow_rossa_20260102_092720",
+  "status": "completed",
+  "final_metrics": {
+    "val/reconstruction_loss": 0.048856355249881744,
+    "val/dice": 0.8939565420150757,
+    "val/iou": 0.8972352743148804,
+    "val/precision": 0.9545723795890808,
+    "val/recall": 0.9327640533447266,
+    "val/specificity": 0.9327640533447266,
+    "val/betti_0_error": 31.170000076293945,
+    "val/betti_1_error": 57.709999084472656,
+    "val/cldice": 0.9171634912490845
+  },
+  "best_checkpoint": "experiments/segdiff_flow/rossa/segdiff_flow_rossa_20260102_092720/checkpoints/best.ckpt"
+}

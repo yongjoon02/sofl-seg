@@ -1,0 +1,15 @@
+{
+  "experiment_id": "berdiff_xca_20260102_095218",
+  "status": "completed",
+  "final_metrics": {
+    "val/dice": 0.8005818128585815,
+    "val/iou": 0.8700803518295288,
+    "val/precision": 0.9332602620124817,
+    "val/recall": 0.9216299057006836,
+    "val/specificity": 0.9216299057006836,
+    "val/betti_0_error": 10.5,
+    "val/betti_1_error": 100.0,
+    "val/cldice": 0.8405171632766724
+  },
+  "best_checkpoint": "experiments/berdiff/xca/berdiff_xca_20260102_095218/checkpoints/best.ckpt"
+}

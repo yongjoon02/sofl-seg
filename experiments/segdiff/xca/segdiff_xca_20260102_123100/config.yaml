@@ -1,0 +1,36 @@
+model:
+  arch_name: segdiff
+  image_size: 320
+  dim: 64
+  timesteps: 100
+  learning_rate: 0.0002
+  weight_decay: 1.0e-05
+  experiment_name: segdiff
+  data_name: xca
+  num_ensemble: 5
+  use_ema: true
+  ema_decay: 0.9999
+  log_image_enabled: false
+  log_image_names:
+  - 0000.png
+  - 0010.png
+  - 0019.png
+  loss_type: mse
+data:
+  name: xca
+  train_dir: data/xca_full/train
+  val_dir: data/xca_full/val
+  test_dir: data/xca_full/test
+  crop_size: 320
+  train_bs: 8
+  num_samples_per_image: 16
+trainer:
+  max_epochs: 500
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+  enable_progress_bar: true
+  check_val_every_n_epoch: 25
+  accumulate_grad_batches: 8
+  log_every_n_steps: 10
+  gradient_clip_val: 1.0

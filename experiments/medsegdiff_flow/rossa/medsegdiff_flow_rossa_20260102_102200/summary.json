@@ -1,0 +1,16 @@
+{
+  "experiment_id": "medsegdiff_flow_rossa_20260102_102200",
+  "status": "completed",
+  "final_metrics": {
+    "val/reconstruction_loss": 0.04830273240804672,
+    "val/dice": 0.8936903476715088,
+    "val/iou": 0.8973913788795471,
+    "val/precision": 0.9522989392280579,
+    "val/recall": 0.9349201917648315,
+    "val/specificity": 0.9349201917648315,
+    "val/betti_0_error": 30.690000534057617,
+    "val/betti_1_error": 51.939998626708984,
+    "val/cldice": 0.9170153737068176
+  },
+  "best_checkpoint": "experiments/medsegdiff_flow/rossa/medsegdiff_flow_rossa_20260102_102200/checkpoints/best.ckpt"
+}

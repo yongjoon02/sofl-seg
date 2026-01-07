@@ -5,13 +5,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 import lightning.pytorch as L
+from monai.inferers import SlidingWindowInferer
 from torchmetrics import MetricCollection
+from torchmetrics.classification import (
+    BinaryJaccardIndex,
+    BinaryPrecision,
+    BinaryRecall,
+    BinarySpecificity,
+)
+from torchmetrics.segmentation.dice import DiceScore
 from torchdiffeq import odeint
 
 from src.registry.base import ARCHS_REGISTRY
 from src.archs.components import unet  # noqa: F401 - Register architectures
 from src.archs.components.flow import SchrodingerBridgeConditionalFlowMatcher
-from src.metrics.general_metrics import Dice, Precision, Recall, Specificity, JaccardIndex
 from src.metrics.vessel_metrics import clDice, Betti0Error, Betti1Error
 from src.archs.components.utils import random_patch_batch, select_patch_params
 
@@ -113,11 +120,11 @@ class FlowModel(L.LightningModule):
         
         # Metrics
         self.val_metrics = MetricCollection({
-            'dice': Dice(num_classes=num_classes, average='macro'),
-            'precision': Precision(num_classes=num_classes, average='macro'),
-            'recall': Recall(num_classes=num_classes, average='macro'),
-            'specificity': Specificity(num_classes=num_classes, average='macro'),
-            'iou': JaccardIndex(num_classes=num_classes, average='macro'),
+            'dice': DiceScore(num_classes=num_classes, average='macro', include_background=False, input_format="index"),
+            'precision': BinaryPrecision(),
+            'recall': BinaryRecall(),
+            'specificity': BinarySpecificity(),
+            'iou': BinaryJaccardIndex(),
         })
         
         self.vessel_metrics = MetricCollection({
@@ -154,6 +161,21 @@ class FlowModel(L.LightningModule):
 
         # Buffer for distributed image logging (validation/test).
         self._pending_image_logs: list[dict] = []
+
+        # Sliding window inferer for validation/test (match diffusion behavior).
+        self.inferer = SlidingWindowInferer(
+            roi_size=(image_size, image_size),
+            sw_batch_size=4,
+            overlap=0.25,
+            mode='gaussian',
+        )
+
+    def _infer_sliding(self, images: torch.Tensor) -> torch.Tensor:
+        """Run sliding-window inference with fresh noise per patch."""
+        def _sample_fn(x: torch.Tensor) -> torch.Tensor:
+            noise = torch.randn_like(x)
+            return self.sample(noise, x)
+        return self.inferer(images, _sample_fn)
 
     def training_step(self, batch, batch_idx):
         images = batch['image']  # condition
@@ -462,21 +484,13 @@ class FlowModel(L.LightningModule):
         if self.hparams.num_ensemble > 1:
             output_geometry_list = []
             for _ in range(self.hparams.num_ensemble):
-                if not getattr(self.hparams, 'use_x0_mixing', False) or getattr(self.hparams, 'x0_policy', 'legacy') == 'legacy':
-                    noise = torch.randn_like(geometry)
-                else:
-                    noise = self.make_x0_mixed(geometry, 'val', self.global_step)
-                saved_steps, output_geometry = self.sample(noise, images, return_intermediate=True)
+                output_geometry = self._infer_sliding(images)
                 output_geometry_list.append(output_geometry)
             # Average predictions
             output_geometry = torch.stack(output_geometry_list).mean(dim=0)
         else:
             # Single sampling
-            if not getattr(self.hparams, 'use_x0_mixing', False) or getattr(self.hparams, 'x0_policy', 'legacy') == 'legacy':
-                noise = torch.randn_like(geometry)
-            else:
-                noise = self.make_x0_mixed(geometry, 'val', self.global_step)
-            saved_steps, output_geometry = self.sample(noise, images, return_intermediate=True)
+            output_geometry = self._infer_sliding(images)
         
         # Compute reconstruction loss (final generation quality)
         loss = torch.abs(output_geometry - geometry).mean()
@@ -531,25 +545,17 @@ class FlowModel(L.LightningModule):
             labels = labels.squeeze(1)
         labels = (labels > 0.5).long()
         
-        # Prepare noise (same shape as geometry would be)
-        noise = torch.randn(images.shape[0], 1, images.shape[2], images.shape[3], 
-                          device=images.device, dtype=images.dtype)
-        
         # Ensemble: multiple sampling and averaging
         if self.hparams.num_ensemble > 1:
             output_geometry_list = []
             for _ in range(self.hparams.num_ensemble):
-                if not getattr(self.hparams, 'use_x0_mixing', False) or getattr(self.hparams, 'x0_policy', 'legacy') == 'legacy':
-                    noise = torch.randn_like(noise)
-                else:
-                    noise = self.make_x0_mixed(noise, 'test', self.global_step)
-                output_geometry = self.sample(noise, images)
+                output_geometry = self._infer_sliding(images)
                 output_geometry_list.append(output_geometry)
             # Average predictions
             output_geometry = torch.stack(output_geometry_list).mean(dim=0)
         else:
             # Single sampling
-            output_geometry = self.sample(noise, images)
+            output_geometry = self._infer_sliding(images)
         
         # Convert predictions to class indices
         if output_geometry.dim() == 4 and output_geometry.shape[1] == 1:

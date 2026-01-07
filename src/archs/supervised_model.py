@@ -10,14 +10,17 @@ from monai.inferers import SlidingWindowInferer
 from torchmetrics import MetricCollection
 
 from src.losses import SoftBCELoss, SoftCrossEntropyLoss, TopoLoss, L1Loss, L2Loss, HuberLoss
+from torchmetrics.classification import (
+    BinaryJaccardIndex,
+    BinaryPrecision,
+    BinaryRecall,
+    BinarySpecificity,
+)
+from torchmetrics.segmentation.dice import DiceScore
+
 from src.metrics import (
     Betti0Error,
     Betti1Error,
-    Dice,
-    JaccardIndex,
-    Precision,
-    Recall,
-    Specificity,
     clDice,
 )
 from src.registry import LOSS_REGISTRY, MODEL_REGISTRY as GLOBAL_MODEL_REGISTRY
@@ -118,20 +121,20 @@ class SupervisedModel(L.LightningModule):
 
         # Metrics
         self.val_metrics = MetricCollection({
-            'dice': Dice(num_classes=num_classes, average='macro'),
-            'precision': Precision(num_classes=num_classes, average='macro'),
-            'recall': Recall(num_classes=num_classes, average='macro'),
-            'specificity': Specificity(num_classes=num_classes, average='macro'),
-            'iou': JaccardIndex(num_classes=num_classes, average='macro'),
+            'dice': DiceScore(num_classes=num_classes, average='macro', include_background=False, input_format="index"),
+            'precision': BinaryPrecision(),
+            'recall': BinaryRecall(),
+            'specificity': BinarySpecificity(),
+            'iou': BinaryJaccardIndex(),
         })
 
         # Test metrics (separate instance to avoid contamination)
         self.test_metrics = MetricCollection({
-            'dice': Dice(num_classes=num_classes, average='macro'),
-            'precision': Precision(num_classes=num_classes, average='macro'),
-            'recall': Recall(num_classes=num_classes, average='macro'),
-            'specificity': Specificity(num_classes=num_classes, average='macro'),
-            'iou': JaccardIndex(num_classes=num_classes, average='macro'),
+            'dice': DiceScore(num_classes=num_classes, average='macro', include_background=False, input_format="index"),
+            'precision': BinaryPrecision(),
+            'recall': BinaryRecall(),
+            'specificity': BinarySpecificity(),
+            'iou': BinaryJaccardIndex(),
         })
 
         self.vessel_metrics = MetricCollection({

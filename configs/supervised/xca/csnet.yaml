@@ -17,7 +17,7 @@ data:
   val_dir: data/xca_full/val
   test_dir: data/xca_full/test
   crop_size: 320
-  train_bs: 8
+  train_bs: 6
   num_samples_per_image: 8
 
 trainer:

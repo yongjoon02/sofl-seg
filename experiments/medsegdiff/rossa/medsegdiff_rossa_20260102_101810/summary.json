@@ -1,0 +1,15 @@
+{
+  "experiment_id": "medsegdiff_rossa_20260102_101810",
+  "status": "completed",
+  "final_metrics": {
+    "val/dice": 0.7903689742088318,
+    "val/iou": 0.8045567274093628,
+    "val/precision": 0.8746793866157532,
+    "val/recall": 0.8935873508453369,
+    "val/specificity": 0.8935873508453369,
+    "val/betti_0_error": 33.970001220703125,
+    "val/betti_1_error": 62.290000915527344,
+    "val/cldice": 0.8282185196876526
+  },
+  "best_checkpoint": "experiments/medsegdiff/rossa/medsegdiff_rossa_20260102_101810/checkpoints/best.ckpt"
+}

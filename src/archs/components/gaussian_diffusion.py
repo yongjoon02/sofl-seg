@@ -408,6 +408,7 @@ def create_medsegdiff(image_size=224, dim=64, timesteps=1000, loss_type='hybrid'
     Args:
         loss_type: 'mse' (default), 'vlb', or 'hybrid'
     """
+    # Use a shallower mid transformer to keep params comparable with SegDiff/BerDiff.
     unet = MedSegDiffUNet(
         dim=dim,
         image_size=image_size,
@@ -415,7 +416,7 @@ def create_medsegdiff(image_size=224, dim=64, timesteps=1000, loss_type='hybrid'
         input_img_channels=1,
         dim_mult=(1, 2, 4, 8),
         full_self_attn=(False, False, True, True),
-        mid_transformer_depth=1
+        mid_transformer_depth=0
     )
     return GaussianDiffusionModel(unet, timesteps=timesteps, objective='predict_x0',
                                  beta_schedule='cosine', loss_type=loss_type)
