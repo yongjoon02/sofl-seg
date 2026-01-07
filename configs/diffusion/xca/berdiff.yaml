@@ -2,8 +2,8 @@
 model:
   arch_name: berdiff
   image_size: 320
-  dim: 64
-  timesteps: 100
+  dim: 40
+  timesteps: 50
   loss_type: mse_dice
   learning_rate: 0.0002
   weight_decay: 0.00001
@@ -24,7 +24,7 @@ data:
   val_dir: data/xca_full/val
   test_dir: data/xca_full/test
   crop_size: 320
-  train_bs: 8
+  train_bs: 6
   num_samples_per_image: 16
 
 trainer:

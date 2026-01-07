@@ -34,7 +34,7 @@ data:
   train_sam_dir: data/ROSSA/train_sam
   val_dir: data/ROSSA/val
   test_dir: data/ROSSA/test
-  train_bs: 8
+  train_bs: 6
   num_samples_per_image: 1
   use_sam: false
 
@@ -42,7 +42,7 @@ trainer:
   max_epochs: 500
   accelerator: gpu
   devices: 1
-  precision: 16-mixed
+  precision: 32-true
   enable_progress_bar: true
   check_val_every_n_epoch: 25
   accumulate_grad_batches: 8

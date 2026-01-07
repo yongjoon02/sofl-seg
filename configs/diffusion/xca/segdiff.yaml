@@ -2,8 +2,8 @@
 model:
   arch_name: segdiff
   image_size: 320
-  dim: 64
-  timesteps: 100
+  dim: 32
+  timesteps: 50
   learning_rate: 0.0002
   weight_decay: 0.00001
   experiment_name: segdiff
@@ -24,14 +24,14 @@ data:
   val_dir: data/xca_full/val
   test_dir: data/xca_full/test
   crop_size: 320
-  train_bs: 8
+  train_bs: 6
   num_samples_per_image: 16
 
 trainer:
   max_epochs: 500
   accelerator: gpu
   devices: 1
-  precision: 16-mixed
+  precision: 32-true
   enable_progress_bar: true
   check_val_every_n_epoch: 25
   accumulate_grad_batches: 8

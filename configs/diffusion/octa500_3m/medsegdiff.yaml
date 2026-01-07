@@ -2,7 +2,7 @@
 model:
   arch_name: medsegdiff
   image_size: 224
-  dim: 64
+  dim: 32
   timesteps: 100
   learning_rate: 0.0002
   weight_decay: 0.00001
@@ -27,7 +27,7 @@ data:
   val_dir: data/OCTA500_3M/val
   test_dir: data/OCTA500_3M/test
   crop_size: 224
-  train_bs: 8
+  train_bs: 6
   num_workers: 8
 
 trainer:
@@ -37,5 +37,5 @@ trainer:
   precision: 32-true  # Diffusion은 FP32 필요
   log_every_n_steps: 50
   check_val_every_n_epoch: 10
-  accumulate_grad_batches: 2
+  accumulate_grad_batches: 8
   gradient_clip_val: 1.0

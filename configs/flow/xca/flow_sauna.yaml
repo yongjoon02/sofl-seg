@@ -39,7 +39,7 @@ data:
   train_dir: data/xca_full/train
   val_dir: data/xca_full/val
   test_dir: data/xca_full/test
-  train_bs: 8  # DDP: 각 GPU당 1 → 총 6 GPU × 1 = 6
+  train_bs: 6  # DDP: 각 GPU당 1 → 총 6 GPU × 1 = 6
   image_size: 320
   num_samples_per_image: 4  # 메모리 최적화
   use_sauna_transform: true  # Enable SAUNA dynamic transformation
@@ -48,7 +48,7 @@ trainer:
   max_epochs: 500
   accelerator: gpu
   devices: 1
-  precision: 16-mixed
+  precision: 32-true
   enable_progress_bar: true
   check_val_every_n_epoch: 25
   accumulate_grad_batches: 8  # 실효 배치: 6 GPU × 1 × 8 = 48
