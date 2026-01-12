@@ -3,13 +3,13 @@ model:
   arch_name: berdiff
   image_size: 224
   dim: 40
-  timesteps: 100
+  timesteps: 50
   learning_rate: 0.0002
   weight_decay: 0.00001
   num_classes: 2
   use_ema: true
   ema_decay: 0.9999
-  num_ensemble: 1
+  num_ensemble: 5
   soft_label_type: none
   soft_label_cache: true
   soft_label_fg_max: 11

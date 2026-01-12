@@ -5,7 +5,7 @@ model:
   patch_plan:
     - [224, 1]
   dim: 32
-  timesteps: 30
+  timesteps: 50
   num_ensemble: 5
   sigma: 0.25
   learning_rate: 0.0002
