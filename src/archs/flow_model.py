@@ -499,7 +499,10 @@ class FlowModel(L.LightningModule):
         # Convert predictions to class indices
         if output_geometry.dim() == 4 and output_geometry.shape[1] == 1:
             output_geometry = output_geometry.squeeze(1)
-        preds = (output_geometry > 0.5).long()  # threshold=0.5 (geometry는 [0, 1] 범위)
+        
+        # Apply sigmoid to convert x1_pred to probability
+        output_prob = torch.sigmoid(output_geometry)
+        preds = (output_prob > 0.5).long()  # threshold after sigmoid
         
         # Convert geometry for logging (ensure same dimensions as output_geometry)
         if geometry.dim() == 4 and geometry.shape[1] == 1:
@@ -560,7 +563,10 @@ class FlowModel(L.LightningModule):
         # Convert predictions to class indices
         if output_geometry.dim() == 4 and output_geometry.shape[1] == 1:
             output_geometry = output_geometry.squeeze(1)
-        preds = (output_geometry > 0.5).long()  # threshold=0.5 (geometry는 [0, 1] 범위)
+        
+        # Apply sigmoid to convert x1_pred to probability
+        output_prob = torch.sigmoid(output_geometry)
+        preds = (output_prob > 0.5).long()  # threshold after sigmoid
         
         # Compute metrics
         general_metrics = self.val_metrics(preds, labels)

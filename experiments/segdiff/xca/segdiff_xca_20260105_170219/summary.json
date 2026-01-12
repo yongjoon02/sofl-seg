@@ -1,0 +1,15 @@
+{
+  "experiment_id": "segdiff_xca_20260105_170219",
+  "status": "completed",
+  "final_metrics": {
+    "val/dice": 0.7773101925849915,
+    "val/iou": 0.8648235201835632,
+    "val/precision": 0.9303838014602661,
+    "val/recall": 0.9174412488937378,
+    "val/specificity": 0.9174412488937378,
+    "val/betti_0_error": 20.399999618530273,
+    "val/betti_1_error": 98.19999694824219,
+    "val/cldice": 0.8300697207450867
+  },
+  "best_checkpoint": "experiments/segdiff/xca/segdiff_xca_20260105_170219/checkpoints/best.ckpt"
+}

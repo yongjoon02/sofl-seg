@@ -172,13 +172,13 @@ class EvalRunner:
             weights_only = False
             if model_info.task == 'supervised':
                 from src.archs.supervised_model import SupervisedModel
-                model = SupervisedModel.load_from_checkpoint(str(checkpoint_path), weights_only=weights_only)
+                model = SupervisedModel.load_from_checkpoint(str(checkpoint_path), weights_only=weights_only, strict=False)
             elif model_info.task == 'flow':
                 from src.archs.flow_model import FlowModel
-                model = FlowModel.load_from_checkpoint(str(checkpoint_path), weights_only=weights_only)
+                model = FlowModel.load_from_checkpoint(str(checkpoint_path), weights_only=weights_only, strict=False)
             else:  # diffusion
                 from src.archs.diffusion_model import DiffusionModel
-                model = DiffusionModel.load_from_checkpoint(str(checkpoint_path), weights_only=weights_only)
+                model = DiffusionModel.load_from_checkpoint(str(checkpoint_path), weights_only=weights_only, strict=False)
 
             # Extract label_subdir from checkpoint config if available
             label_subdir = None

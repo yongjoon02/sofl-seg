@@ -1,0 +1,16 @@
+{
+  "experiment_id": "medsegdiff_flow_xca_20260110_014102",
+  "status": "completed",
+  "final_metrics": {
+    "val/reconstruction_loss": 0.07509974390268326,
+    "val/dice": 0.8282160758972168,
+    "val/iou": 0.7088623046875,
+    "val/precision": 0.8389622569084167,
+    "val/recall": 0.8202948570251465,
+    "val/specificity": 0.9828608632087708,
+    "val/betti_0_error": 38.45000076293945,
+    "val/betti_1_error": 71.55000305175781,
+    "val/cldice": 0.7822087407112122
+  },
+  "best_checkpoint": "experiments/medsegdiff_flow/xca/medsegdiff_flow_xca_20260110_014102/checkpoints/best.ckpt"
+}
