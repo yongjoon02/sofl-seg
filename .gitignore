@@ -115,3 +115,9 @@ coverage.xml
 *.cover
 
 flow-seg/
+
+# local experiments/logs
+experiments/
+logs/
+**/tensorboard/
+**/events.out.tfevents.*
