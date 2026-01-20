@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 
 import lightning as L
 import pandas as pd
+import torch
 import yaml
 
 from src.experiment.tracker import ExperimentTracker
@@ -101,12 +102,12 @@ class EvalRunner:
 
         return None
 
-    def get_data_module(self, label_subdir: Optional[str] = None):
+    def get_data_module(self, data_cfg: Optional[dict] = None, label_subdir: Optional[str] = None):
         """Create data module for current dataset.
-        
+
         Args:
-            label_subdir: Label subdirectory (e.g., 'label_sauna'). 
-                         If None, uses default 'label'.
+            data_cfg: Data config dict (from training config.yaml) to mirror train settings.
+            label_subdir: Optional label subdirectory override (e.g., 'label_sauna').
         """
         import inspect
 
@@ -114,30 +115,36 @@ class EvalRunner:
         dm_cls = info.class_ref
         sig = inspect.signature(dm_cls.__init__)
 
-        # Build kwargs from metadata, respecting the datamodule signature
-        kwargs = {}
-        params = sig.parameters
+        # Build kwargs from config with dataset defaults as fallback.
+        data_cfg = data_cfg or {}
+        params = set(sig.parameters)
 
-        if 'train_dir' in params:
-            kwargs['train_dir'] = info.default_train_dir
-        if 'val_dir' in params:
-            kwargs['val_dir'] = info.default_val_dir
-        if 'test_dir' in params:
-            kwargs['test_dir'] = info.default_test_dir
-        if 'train_manual_dir' in params:
-            kwargs['train_manual_dir'] = info.default_train_dir
-        if 'train_sam_dir' in params and info.default_train_dir:
-            kwargs['train_sam_dir'] = info.default_train_dir.replace('train_manual', 'train_sam')
+        kwargs = {
+            'train_dir': data_cfg.get('train_dir', info.default_train_dir),
+            'val_dir': data_cfg.get('val_dir', info.default_val_dir),
+            'test_dir': data_cfg.get('test_dir', info.default_test_dir),
+            'crop_size': data_cfg.get('crop_size', info.default_crop_size),
+            # Keep training batch size from config for consistency, even though eval uses bs=1.
+            'train_bs': data_cfg.get('train_bs', info.default_batch_size),
+        }
 
-        if 'crop_size' in params:
-            kwargs['crop_size'] = info.default_crop_size
-        if 'train_bs' in params:
-            kwargs['train_bs'] = 1  # evaluation은 항상 batch_size=1로 고정
-        if label_subdir and 'label_subdir' in params:
+        if 'num_samples_per_image' in data_cfg:
+            kwargs['num_samples_per_image'] = data_cfg['num_samples_per_image']
+        if 'label_subdir' in data_cfg:
+            kwargs['label_subdir'] = data_cfg['label_subdir']
+        elif label_subdir is not None:
             kwargs['label_subdir'] = label_subdir
+        if 'use_sauna_transform' in data_cfg:
+            kwargs['use_sauna_transform'] = data_cfg['use_sauna_transform']
+        if 'train_manual_dir' in data_cfg:
+            kwargs['train_manual_dir'] = data_cfg['train_manual_dir']
+        if 'train_sam_dir' in data_cfg:
+            kwargs['train_sam_dir'] = data_cfg['train_sam_dir']
+        if 'use_sam' in data_cfg:
+            kwargs['use_sam'] = data_cfg['use_sam']
 
-        # Fallback: respect provided defaults in signature if metadata missing
-        return dm_cls(**kwargs)
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in params}
+        return dm_cls(**filtered_kwargs)
 
     def evaluate_model(self, model_name: str, checkpoint_path: Optional[Path] = None) -> Optional[EvaluationResult]:
         """
@@ -169,27 +176,48 @@ class EvalRunner:
 
         try:
             # Load model based on task type (allow full checkpoint load for PyTorch 2.6+)
+            # Use strict=True so mismatched checkpoints fail loudly (prevents silent random init).
             weights_only = False
+            strict = True
+            # Always load checkpoints on CPU to avoid invalid device ids baked into checkpoints.
+            map_location = torch.device("cpu")
             if model_info.task == 'supervised':
                 from src.archs.supervised_model import SupervisedModel
-                model = SupervisedModel.load_from_checkpoint(str(checkpoint_path), weights_only=weights_only, strict=False)
+                model = SupervisedModel.load_from_checkpoint(
+                    str(checkpoint_path),
+                    map_location=map_location,
+                    weights_only=weights_only,
+                    strict=strict,
+                )
             elif model_info.task == 'flow':
                 from src.archs.flow_model import FlowModel
-                model = FlowModel.load_from_checkpoint(str(checkpoint_path), weights_only=weights_only, strict=False)
+                model = FlowModel.load_from_checkpoint(
+                    str(checkpoint_path),
+                    map_location=map_location,
+                    weights_only=weights_only,
+                    strict=strict,
+                )
             else:  # diffusion
                 from src.archs.diffusion_model import DiffusionModel
-                model = DiffusionModel.load_from_checkpoint(str(checkpoint_path), weights_only=weights_only, strict=False)
+                model = DiffusionModel.load_from_checkpoint(
+                    str(checkpoint_path),
+                    map_location=map_location,
+                    weights_only=weights_only,
+                    strict=strict,
+                )
 
-            # Extract label_subdir from checkpoint config if available
+            # Extract data config from checkpoint if available
+            data_cfg = None
             label_subdir = None
             config_path = checkpoint_path.parent.parent / "config.yaml"
             if config_path.exists():
                 with open(config_path, 'r') as f:
-                    config = yaml.safe_load(f)
-                    label_subdir = config.get('data', {}).get('label_subdir', None)
+                    config = yaml.safe_load(f) or {}
+                    data_cfg = config.get('data', {})
+                    label_subdir = data_cfg.get('label_subdir', None)
 
-            # Setup data (use label_subdir from config if available)
-            data_module = self.get_data_module(label_subdir=label_subdir)
+            # Setup data (use training config settings when available)
+            data_module = self.get_data_module(data_cfg=data_cfg, label_subdir=label_subdir)
             data_module.setup("test")
 
             # Extract experiment ID from checkpoint path (before creating logger)

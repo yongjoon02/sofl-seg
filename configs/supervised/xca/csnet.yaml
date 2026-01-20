@@ -18,7 +18,7 @@ data:
   test_dir: data/xca_full/test
   crop_size: 320
   train_bs: 6
-  num_samples_per_image: 8
+  num_samples_per_image: 16
 
 trainer:
   max_epochs: 400
@@ -26,7 +26,7 @@ trainer:
   devices: 1
   precision: 32-true
   log_every_n_steps: 10
-  check_val_every_n_epoch: 20
+  check_val_every_n_epoch: 25
   enable_progress_bar: true
   gradient_clip_val: 1.0
   accumulate_grad_batches: 8

@@ -21,9 +21,10 @@ data:
   crop_size: 224
   train_bs: 6
   use_sam: false  # true: SAM-annotated 데이터 포함 (618 images)
+  num_samples_per_image: 16
 
 trainer:
-  max_epochs: 300
+  max_epochs: 400
   accelerator: gpu
   devices: 1
   precision: 32-true

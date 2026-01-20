@@ -618,7 +618,7 @@ class MedSegDiffUNet(nn.Module):
     def __init__(self, dim, image_size, mask_channels=1, input_img_channels=1, init_dim=None,
                  dim_mult=(1, 2, 4, 8), full_self_attn=(False, False, True, True), attn_dim_head=32,
                  attn_heads=4, mid_transformer_depth=1, resnet_block_groups=8,
-                 skip_connect_condition_fmap=False):
+                 skip_connect_condition_fmap=False, conditioning_fmap_size=None):
         super().__init__()
 
         self.image_size = image_size
@@ -644,7 +644,10 @@ class MedSegDiffUNet(nn.Module):
         block_klass = partial(ResnetBlock, groups=resnet_block_groups)
         attn_kwargs = dict(dim_head=attn_dim_head, heads=attn_heads)
 
-        curr_fmap_size = image_size
+        if conditioning_fmap_size is None:
+            curr_fmap_size = image_size
+        else:
+            curr_fmap_size = min(image_size, conditioning_fmap_size)
         self.downs = nn.ModuleList([])
         self.conditioners = nn.ModuleList([])
 
@@ -661,7 +664,7 @@ class MedSegDiffUNet(nn.Module):
                 downsample(dim_in, dim_out) if not is_last else nn.Conv2d(dim_in, dim_out, 3, padding=1)]))
 
             if not is_last:
-                curr_fmap_size //= 2
+                curr_fmap_size = max(1, curr_fmap_size // 2)
 
         mid_dim = dims[-1]
         self.mid_block1 = block_klass(mid_dim, mid_dim, time_emb_dim=time_dim)

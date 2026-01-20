@@ -121,8 +121,10 @@ def _register_builtin_models():
     from src.archs.components import CSNet, DSCNet
     from src.archs.components.unet import DhariwalConcatUNet, DhariwalConcatUNetMultiHead
     from src.archs.components.medsegdiff_flow import MedSegDiffFlow
+    from src.archs.components.medsegdiff_flow_multitask import MedSegDiffFlowMultiTask
     from src.archs.components.segdiff_flow import SegDiffFlow
     from src.archs.components.binomial_diffusion import create_berdiff
+    from src.archs.components.cold_diffusion import create_colddiff
     from src.archs.components.gaussian_diffusion import create_medsegdiff, create_segdiff
     
     # CSNet
@@ -204,6 +206,22 @@ def _register_builtin_models():
                 'default_epochs': 500,
             }
         )
+
+    # ColdDiff
+    if 'colddiff' not in MODEL_REGISTRY:
+        MODEL_REGISTRY.register(
+            name='colddiff',
+            obj=create_colddiff,
+            metadata={
+                'task': 'diffusion',
+                'params': 16_224_737,
+                'speed': 'slow',
+                'description': 'Cold Diffusion (deterministic image->seg restoration)',
+                'paper_url': None,
+                'default_lr': 2e-4,
+                'default_epochs': 500,
+            }
+        )
     
     # Dhariwal Concat UNet (Flow)
     if 'dhariwal_concat_unet' not in MODEL_REGISTRY:
@@ -247,6 +265,22 @@ def _register_builtin_models():
                 'params': 25_000_000,
                 'speed': 'slow',
                 'description': 'MedSegDiff UNet backbone for flow matching (flow head only)',
+                'paper_url': None,
+                'default_lr': 2e-4,
+                'default_epochs': 500,
+            }
+        )
+
+    # MedSegDiff Flow multi-task (Flow)
+    if 'medsegdiff_flow_multitask' not in MODEL_REGISTRY:
+        MODEL_REGISTRY.register(
+            name='medsegdiff_flow_multitask',
+            obj=MedSegDiffFlowMultiTask,
+            metadata={
+                'task': 'flow',
+                'params': 30_000_000,
+                'speed': 'slow',
+                'description': 'MedSegDiff flow with dual heads (hard+soft) multi-task',
                 'paper_url': None,
                 'default_lr': 2e-4,
                 'default_epochs': 500,

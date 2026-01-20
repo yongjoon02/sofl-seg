@@ -18,7 +18,7 @@ data:
   test_dir: data/xca_full/test
   crop_size: 320
   train_bs: 6
-  num_samples_per_image: 8
+  num_samples_per_image: 16
 
 trainer:
   max_epochs: 400

@@ -55,6 +55,7 @@ class FlowModel(L.LightningModule):
         data_name: str = 'xca',
         log_image_enabled: bool = False,
         log_image_names: list = None,
+        use_sliding_infer: bool = True,
         # UNet architecture parameters
         model_channels: int = 32,
         channel_mult: list = [1, 2, 4, 8],
@@ -85,6 +86,8 @@ class FlowModel(L.LightningModule):
             raise ValueError(f"Unknown architecture: {arch_name}. Available: {list(ARCHS_REGISTRY.keys())}")
         
         arch_class = ARCHS_REGISTRY.get(arch_name)
+
+        self.is_multitask = arch_name == 'medsegdiff_flow_multitask'
         
         self.use_geometry_head = arch_name == 'dhariwal_concat_unet_multihead'
 
@@ -135,6 +138,7 @@ class FlowModel(L.LightningModule):
         
         self.log_image_enabled = log_image_enabled
         self.log_image_names = log_image_names if log_image_names is not None else ['00036.png']
+        self.use_sliding_infer = use_sliding_infer
         
         # Loss configuration (registry 우선)
         from src.registry import LOSS_REGISTRY
@@ -171,11 +175,49 @@ class FlowModel(L.LightningModule):
         )
 
     def _infer_sliding(self, images: torch.Tensor) -> torch.Tensor:
-        """Run sliding-window inference with fresh noise per patch."""
-        def _sample_fn(x: torch.Tensor) -> torch.Tensor:
-            noise = torch.randn_like(x)
-            return self.sample(noise, x)
-        return self.inferer(images, _sample_fn)
+        """Run sliding-window inference with consistent noise per image."""
+        if self.is_multitask:
+            noise_full = self._sample_x0_like(images, channels=self._infer_noise_channels())
+            combined = torch.cat([images, noise_full], dim=1)
+
+            def _sample_fn(x: torch.Tensor) -> torch.Tensor:
+                imgs = x[:, :1, :, :]
+                noise = x[:, 1:, :, :]
+                output_geometry = self.sample(noise, imgs)
+                return self._geometry_to_prob(output_geometry)
+
+            prob = self.inferer(combined, _sample_fn)
+            return self._prob_to_geometry(prob)
+
+        noise_full = self._sample_x0_like(images, channels=self._infer_noise_channels())
+
+        def _sample_fn(x: torch.Tensor, condition: torch.Tensor | None = None) -> torch.Tensor:
+            # Use per-image noise cropped to each patch (condition is sliced by the inferer).
+            noise = condition if condition is not None else torch.randn_like(x)
+            output_geometry = self.sample(noise, x)
+            # Merge in probability space to avoid artifacts at patch boundaries.
+            return self._geometry_to_prob(output_geometry)
+
+        prob = self.inferer(images, _sample_fn, condition=noise_full)
+        return self._prob_to_geometry(prob)
+
+    def _infer_full(self, images: torch.Tensor) -> torch.Tensor:
+        """Run full-image inference (no sliding window)."""
+        noise = self._sample_x0_like(images, channels=self._infer_noise_channels())
+        return self.sample(noise, images)
+
+    def _infer_noise_channels(self) -> int:
+        return 2 if self.is_multitask else 1
+
+    @staticmethod
+    def _geometry_to_prob(geometry: torch.Tensor) -> torch.Tensor:
+        """Map geometry in [-1, 1] to probability [0, 1] with clipping."""
+        return torch.clamp((geometry + 1.0) / 2.0, 0.0, 1.0)
+
+    @staticmethod
+    def _prob_to_geometry(prob: torch.Tensor) -> torch.Tensor:
+        """Map probability [0, 1] back to geometry [-1, 1]."""
+        return prob * 2.0 - 1.0
 
     def training_step(self, batch, batch_idx):
         images = batch['image']  # condition
@@ -184,24 +226,33 @@ class FlowModel(L.LightningModule):
         labels = batch.get('label', geometry)
         
         patch_size, num_patches = select_patch_params(self.hparams.patch_plan)
-        
-        # Prepare noise (x0) and target geometry
-        if not getattr(self.hparams, 'use_x0_mixing', False) or getattr(self.hparams, 'x0_policy', 'legacy') == 'legacy':
-            noise = torch.randn_like(geometry)
+
+        if self.is_multitask:
+            if labels.dim() == 3:
+                labels = labels.unsqueeze(1)
+            if geometry.dim() == 3:
+                geometry = geometry.unsqueeze(1)
+            labels_hard = labels * 2.0 - 1.0
+            geometry_for_flow = torch.cat([labels_hard, geometry], dim=1)
+            noise = self._sample_x0_like(geometry_for_flow)
+            noise, geometry_for_flow, images, labels = random_patch_batch(
+                [noise, geometry_for_flow, images, labels], patch_size, num_patches
+            )
         else:
-            noise = self.make_x0_mixed(geometry, 'train', self.global_step)
-        
-        # Random patch extraction
-        noise, geometry, images, labels = random_patch_batch(
-            [noise, geometry, images, labels], patch_size, num_patches
-        )
+            # Prepare noise (x0) and target geometry (always Gaussian noise).
+            noise = self._sample_x0_like(geometry)
+            # Random patch extraction
+            noise, geometry, images, labels = random_patch_batch(
+                [noise, geometry, images, labels], patch_size, num_patches
+            )
+            geometry_for_flow = geometry
         
         # Flow matching: x (noise) -> geometry
-        t, xt, ut = self.flow_matcher.sample_location_and_conditional_flow(noise, geometry)
+        t, xt, ut = self.flow_matcher.sample_location_and_conditional_flow(noise, geometry_for_flow)
 
         with torch.no_grad():
             # Diagnostics: noise vs target scale and early-t visualization.
-            x1 = geometry
+            x1 = geometry_for_flow
             x0 = noise
             x1_norm = torch.linalg.vector_norm(x1.flatten(1), dim=1)
             x0_diff_norm = torch.linalg.vector_norm((x1 - x0).flatten(1), dim=1)
@@ -241,7 +292,7 @@ class FlowModel(L.LightningModule):
         # Compute loss based on loss_type
         if self.use_registry_loss:
             loss, loss_dict = self.loss_fn(
-                v, ut, xt, geometry, t=t, geometry_pred=geometry_pred, hard_labels=labels
+                v, ut, xt, geometry_for_flow, t=t, geometry_pred=geometry_pred, hard_labels=labels
             )
             for name, value in loss_dict.items():
                 self.log(f'train/{name}_loss', value, prog_bar=False, sync_dist=True)
@@ -420,6 +471,9 @@ class FlowModel(L.LightningModule):
             x0 = mask * near + (1 - mask) * noise
             near_rate = mask.mean().item()
 
+        # Keep x0 in the same [-1, 1] range as geometry.
+        x0 = torch.clamp(x0, -1.0, 1.0)
+
         if getattr(self.hparams, 'use_x0_mixing', False):
             self.log(f'{stage}/x0_near_rate', near_rate, prog_bar=False, sync_dist=True)
             self.log(f'{stage}/x0_mean', x0.mean(), prog_bar=False, sync_dist=True)
@@ -428,6 +482,14 @@ class FlowModel(L.LightningModule):
             self.log(f'{stage}/x1_std', x1.std(), prog_bar=False, sync_dist=True)
 
         return x0
+
+    def _sample_x0_like(self, ref: torch.Tensor, channels: int | None = None) -> torch.Tensor:
+        """Sample x0 from N(0, 1)."""
+        if channels is None:
+            return torch.randn_like(ref)
+        shape = list(ref.shape)
+        shape[1] = channels
+        return torch.randn(shape, device=ref.device, dtype=ref.dtype)
 
 
     def sample(self, noise, images, return_intermediate: bool = False, save_steps: list = None):
@@ -484,25 +546,57 @@ class FlowModel(L.LightningModule):
         if self.hparams.num_ensemble > 1:
             output_geometry_list = []
             for _ in range(self.hparams.num_ensemble):
-                output_geometry = self._infer_sliding(images)
+                if getattr(self.hparams, 'use_sliding_infer', True):
+                    output_geometry = self._infer_sliding(images)
+                else:
+                    output_geometry = self._infer_full(images)
                 output_geometry_list.append(output_geometry)
             # Average predictions
             output_geometry = torch.stack(output_geometry_list).mean(dim=0)
         else:
             # Single sampling
-            output_geometry = self._infer_sliding(images)
+            if getattr(self.hparams, 'use_sliding_infer', True):
+                output_geometry = self._infer_sliding(images)
+            else:
+                output_geometry = self._infer_full(images)
         
+        output_geometry_hard = output_geometry
+        output_geometry_soft = None
+        if self.is_multitask and output_geometry.dim() == 4 and output_geometry.shape[1] >= 2:
+            output_geometry_hard = output_geometry[:, 0:1, :, :]
+            output_geometry_soft = output_geometry[:, 1:2, :, :]
+
         # Compute reconstruction loss (final generation quality)
-        loss = torch.abs(output_geometry - geometry).mean()
+        loss_pred = output_geometry_soft if output_geometry_soft is not None else output_geometry_hard
+        loss = torch.abs(loss_pred - geometry).mean()
         self.log('val/reconstruction_loss', loss, prog_bar=True, sync_dist=True)
         
         # Convert predictions to class indices
-        if output_geometry.dim() == 4 and output_geometry.shape[1] == 1:
-            output_geometry = output_geometry.squeeze(1)
+        if output_geometry_hard.dim() == 4 and output_geometry_hard.shape[1] == 1:
+            output_geometry_hard = output_geometry_hard.squeeze(1)
+        # Debug stats for output distribution (helps diagnose noisy preds).
+        out_min = output_geometry_hard.min()
+        out_max = output_geometry_hard.max()
+        out_mean = output_geometry_hard.mean()
+        out_std = output_geometry_hard.std()
+        self.log('val/output_geometry_min', out_min, prog_bar=False, sync_dist=True)
+        self.log('val/output_geometry_max', out_max, prog_bar=False, sync_dist=True)
+        self.log('val/output_geometry_mean', out_mean, prog_bar=False, sync_dist=True)
+        self.log('val/output_geometry_std', out_std, prog_bar=False, sync_dist=True)
+        self.log('val/x1_pred_min', out_min, prog_bar=False, sync_dist=True)
+        self.log('val/x1_pred_max', out_max, prog_bar=False, sync_dist=True)
+        self.log('val/x1_pred_mean', out_mean, prog_bar=False, sync_dist=True)
+        self.log('val/x1_pred_std', out_std, prog_bar=False, sync_dist=True)
         
-        # Apply sigmoid to convert x1_pred to probability
-        output_prob = torch.sigmoid(output_geometry)
-        preds = (output_prob > 0.5).long()  # threshold after sigmoid
+        # Threshold on logits (0 기준)
+        preds = (output_geometry_hard > 0.0).long()
+        if batch_idx == 0 and not getattr(self.trainer, "sanity_checking", False):
+            from pytorch_lightning.utilities.rank_zero import rank_zero_info
+            rank_zero_info(
+                "val/x1_pred stats: "
+                f"min={out_min.item():.4f} max={out_max.item():.4f} "
+                f"mean={out_mean.item():.4f} std={out_std.item():.4f}"
+            )
         
         # Convert geometry for logging (ensure same dimensions as output_geometry)
         if geometry.dim() == 4 and geometry.shape[1] == 1:
@@ -528,7 +622,7 @@ class FlowModel(L.LightningModule):
             preds=preds,
             tag_prefix='val',
             geometry=geometry,
-            output_geometry=output_geometry,
+            output_geometry=output_geometry_hard,
         )
         
         return general_metrics['dice']
@@ -552,21 +646,30 @@ class FlowModel(L.LightningModule):
         if self.hparams.num_ensemble > 1:
             output_geometry_list = []
             for _ in range(self.hparams.num_ensemble):
-                output_geometry = self._infer_sliding(images)
+                if getattr(self.hparams, 'use_sliding_infer', True):
+                    output_geometry = self._infer_sliding(images)
+                else:
+                    output_geometry = self._infer_full(images)
                 output_geometry_list.append(output_geometry)
             # Average predictions
             output_geometry = torch.stack(output_geometry_list).mean(dim=0)
         else:
             # Single sampling
-            output_geometry = self._infer_sliding(images)
+            if getattr(self.hparams, 'use_sliding_infer', True):
+                output_geometry = self._infer_sliding(images)
+            else:
+                output_geometry = self._infer_full(images)
         
+        output_geometry_hard = output_geometry
+        if self.is_multitask and output_geometry.dim() == 4 and output_geometry.shape[1] >= 2:
+            output_geometry_hard = output_geometry[:, 0:1, :, :]
+
         # Convert predictions to class indices
-        if output_geometry.dim() == 4 and output_geometry.shape[1] == 1:
-            output_geometry = output_geometry.squeeze(1)
+        if output_geometry_hard.dim() == 4 and output_geometry_hard.shape[1] == 1:
+            output_geometry_hard = output_geometry_hard.squeeze(1)
         
-        # Apply sigmoid to convert x1_pred to probability
-        output_prob = torch.sigmoid(output_geometry)
-        preds = (output_prob > 0.5).long()  # threshold after sigmoid
+        # Threshold on logits (0 기준)
+        preds = (output_geometry_hard > 0.0).long()
         
         # Compute metrics
         general_metrics = self.val_metrics(preds, labels)
@@ -633,7 +736,7 @@ class FlowModel(L.LightningModule):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode='max',  # val/dice는 높을수록 좋음
-            patience=3,  # validation 주기(25 epoch)를 고려 = 75 epoch
+            patience=5,  # validation 주기(25 epoch)를 고려 = 75 epoch
             factor=0.5,
         )
 
@@ -643,7 +746,7 @@ class FlowModel(L.LightningModule):
                 'scheduler': scheduler,
                 'monitor': 'val/dice',  # ✅ 올바른 metric
                 'interval': 'epoch',
-                'frequency': 25,  # validation 주기와 일치
+                'frequency': 10,  # validation 주기와 일치
             }
         }
 

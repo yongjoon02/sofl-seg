@@ -8,6 +8,7 @@ model:
   timesteps: 50
   num_ensemble: 1
   sigma: 0.25
+  use_sliding_infer: true
   learning_rate: 0.0002
   weight_decay: 0.00001
   use_ema: true
@@ -15,7 +16,7 @@ model:
   num_classes: 2
   experiment_name: flow_model_medsegdiff
   data_name: xca
-  log_image_enabled: false
+  log_image_enabled: true
   log_image_names:
     - '0000.png'
     - '0010.png'
@@ -27,12 +28,12 @@ model:
   channel_mult: [1, 2, 3, 4]
   channel_mult_emb: 4
   num_blocks: 3
-  attn_resolutions: [16, 16, 8, 8]
+  # Match attention to actual feature map resolutions: 320 -> 160 -> 80 -> 40
+  attn_resolutions: [80, 40]
   dropout: 0.0
   label_dim: 0
   augment_dim: 0
-  # Loss configuration: L2 (MSE) for flow matching
-  # Validation/Test uses sliding window (same as diffusion) for fair comparison
+
   loss:
     name: flow_matching
     params:
@@ -45,8 +46,8 @@ data:
   test_dir: data/xca_full/test
   train_bs: 6  # DDP: 각 GPU당 1 → 총 6 GPU × 1 = 6
   image_size: 320
-  num_samples_per_image: 4  # 메모리 최적화
-  use_sauna_transform: true  # Enable SAUNA dynamic transformation
+  num_samples_per_image: 16  # 메모리 최적화
+  use_sauna_transform: true 
 
 trainer:
   max_epochs: 500

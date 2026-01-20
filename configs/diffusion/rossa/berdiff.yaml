@@ -9,7 +9,7 @@ model:
   num_classes: 2
   use_ema: true
   ema_decay: 0.9999
-  num_ensemble: 5
+  num_ensemble: 1
   soft_label_type: none
   soft_label_cache: true
   soft_label_fg_max: 11
@@ -30,7 +30,7 @@ data:
   crop_size: 224
   train_bs: 6
   use_sam: false  # true: SAM-annotated 데이터 포함
-
+  num_samples_per_image: 16
 trainer:
   max_epochs: 500
   accelerator: gpu

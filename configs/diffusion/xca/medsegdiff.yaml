@@ -2,13 +2,14 @@
 model:
   arch_name: medsegdiff
   image_size: 320
-  dim: 32
+  dim: 24
   timesteps: 50
   learning_rate: 0.0002
   weight_decay: 0.00001
   experiment_name: medsegdiff
   data_name: xca
-  num_ensemble: 5
+  conditioning_fmap_size: 224
+  num_ensemble: 1
   use_ema: true
   ema_decay: 0.9999
   log_image_enabled: false

@@ -3,6 +3,7 @@
 ROSSA dataset with manual and SAM annotations.
 No label_prob - simpler than OCTA dataset.
 """
+import torch
 from torch.utils.data import ConcatDataset
 
 from src.data.base_dataset import BaseOCTDataModule, BaseOCTDataset
@@ -16,6 +17,18 @@ class ROSSADataset(BaseOCTDataset):
     def get_data_fields(self) -> list[str]:
         """Only load image and label - soft labels will be generated dynamically"""
         return ['image', 'label']
+
+    @staticmethod
+    def to_geometry(label: torch.Tensor) -> torch.Tensor:
+        """Map binary label in [0, 1] to geometry in [-1, 1]."""
+        return label.float() * 2.0 - 1.0
+
+    def __getitem__(self, index):
+        """Ensure geometry matches flow model expectations ([-1, 1])."""
+        data = super().__getitem__(index)
+        if 'label' in data:
+            data['geometry'] = self.to_geometry(data['label'])
+        return data
 
 
 class ROSSADataModule(BaseOCTDataModule):

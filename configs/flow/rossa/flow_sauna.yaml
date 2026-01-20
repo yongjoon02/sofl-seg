@@ -6,7 +6,7 @@ model:
     - [224, 1]
   dim: 32
   timesteps: 30
-  num_ensemble: 5
+  num_ensemble: 1
   sigma: 0.25
   learning_rate: 0.0002
   weight_decay: 0.00001
@@ -23,7 +23,7 @@ model:
   channel_mult: [1, 2, 4, 8]
   channel_mult_emb: 4
   num_blocks: 3
-  attn_resolutions: [16, 16, 8, 8]
+  attn_resolutions: [56, 28]
   dropout: 0.0
   label_dim: 0
   augment_dim: 0

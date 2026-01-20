@@ -1,9 +1,11 @@
-# ROSSA 데이터셋 - MedSegDiff 학습 설정
+# ROSSA 데이터셋 - ColdDiff 학습 설정
 model:
-  arch_name: medsegdiff
+  arch_name: colddiff
   image_size: 224
-  dim: 32
+  dim: 24
+  channel_mult: [1, 2, 3, 4]
   timesteps: 50
+  loss_type: hybrid
   learning_rate: 0.0002
   weight_decay: 0.00001
   num_classes: 2
@@ -15,7 +17,7 @@ model:
   soft_label_fg_max: 11
   soft_label_thickness_max: 13
   soft_label_kernel_ratio: 0.1
-  log_image_enabled: true 
+  log_image_enabled: true
   log_image_names:
     - '201.png'
     - '205.png'
@@ -31,6 +33,7 @@ data:
   train_bs: 6
   use_sam: false  # true: SAM-annotated 데이터 포함
   num_samples_per_image: 16
+
 trainer:
   max_epochs: 500
   accelerator: gpu

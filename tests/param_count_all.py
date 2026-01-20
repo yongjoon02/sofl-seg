@@ -52,6 +52,20 @@ def _build_medsegdiff(cfg: dict, unet_module) -> object:
         dim_mult=(1, 2, 4, 8),
         full_self_attn=_full_self_attn_flags(),
         mid_transformer_depth=cfg.get("mid_transformer_depth", 0),
+        conditioning_fmap_size=cfg.get("conditioning_fmap_size"),
+    )
+
+
+def _build_colddiff(cfg: dict, unet_module) -> object:
+    return unet_module.MedSegDiffUNet(
+        dim=cfg.get("dim", 64),
+        image_size=cfg.get("image_size", 224),
+        mask_channels=1,
+        input_img_channels=1,
+        dim_mult=(1, 2, 4, 8),
+        full_self_attn=_full_self_attn_flags(),
+        mid_transformer_depth=cfg.get("mid_transformer_depth", 1),
+        conditioning_fmap_size=cfg.get("conditioning_fmap_size"),
     )
 
 
@@ -111,6 +125,7 @@ def _build_medsegdiff_flow(cfg: dict, unet_module) -> object:
 ARCH_BUILDERS = {
     "segdiff": _build_segdiff,
     "medsegdiff": _build_medsegdiff,
+    "colddiff": _build_colddiff,
     "berdiff": _build_berdiff,
     "segdiff_flow": _build_segdiff_flow,
     "medsegdiff_flow": _build_medsegdiff_flow,

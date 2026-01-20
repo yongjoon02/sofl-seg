@@ -173,9 +173,9 @@ class XCADataset(BaseOCTDataset):
             label: Binary label tensor (C, H, W) or (B, C, H, W) with values in {0, 1}
             
         Returns:
-            geometry: Geometry map tensor (same shape as label) with values in [0, 1]
-                - If use_sauna_transform=True: SAUNA geometry map normalized to [0, 1]
-                - If use_sauna_transform=False: Simple float conversion (identity transform)
+            geometry: Geometry map tensor (same shape as label) with values in [-1, 1]
+                - If use_sauna_transform=True: SAUNA geometry map (already in [-1, 1])
+                - If use_sauna_transform=False: label mapped from [0, 1] to [-1, 1]
         """
         if self.use_sauna_transform:
             # SAUNA 변환 사용
@@ -198,10 +198,7 @@ class XCADataset(BaseOCTDataset):
                 kernel_size=None,
                 kernel_ratio=1.0
             )
-            
-            # Normalize SAUNA output from [-1, 1] to [0, 1] for consistent threshold
-            # This allows using threshold=0.5 in validation/test steps
-            geometry = (geometry + 1.0) / 2.0
+
             
             # Remove batch dimension if input was 3D
             if was_3d:
@@ -209,8 +206,8 @@ class XCADataset(BaseOCTDataset):
             
             return geometry
         else:
-            # 기존 동작: 단순 float 변환 (identity transform)
-            return label.float()
+            # 기존 동작: label을 [-1, 1] 범위로 매핑
+            return label.float() * 2.0 - 1.0
     
     def __getitem__(self, index):
         """
@@ -260,7 +257,7 @@ class XCADataset(BaseOCTDataset):
                 geom = data['geometry']
                 geom_min, geom_max = geom.min().item(), geom.max().item()
                 geom_unique = torch.unique(geom).numel()
-                if geom_unique <= 2 and geom_min in [0.0, 1.0] and geom_max in [0.0, 1.0]:
+                if geom_unique <= 2 and geom_min in [-1.0, 1.0] and geom_max in [-1.0, 1.0]:
                     print(f"⚠️ WARNING: use_sauna_transform=True but geometry appears binary "
                           f"(unique: {geom_unique}, range: [{geom_min:.3f}, {geom_max:.3f}])")
                 else:

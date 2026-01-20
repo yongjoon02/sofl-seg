@@ -383,7 +383,7 @@ class GaussianDiffusionModel(nn.Module):
 
 
 # ====== Factory Functions ======
-def create_segdiff(image_size=224, dim=64, timesteps=1000, loss_type='hybrid'):
+def create_segdiff(image_size=224, dim=64, timesteps=1000, loss_type='hybrid', **_):
     """SegDiff: RRDB-based conditioning (F(x_t) + G(cond))
     
     Args:
@@ -402,7 +402,7 @@ def create_segdiff(image_size=224, dim=64, timesteps=1000, loss_type='hybrid'):
                                  beta_schedule='cosine', loss_type=loss_type)
 
 
-def create_medsegdiff(image_size=224, dim=64, timesteps=1000, loss_type='hybrid'):
+def create_medsegdiff(image_size=224, dim=64, timesteps=1000, loss_type='hybrid', conditioning_fmap_size=None, **_):
     """MedSegDiff: FFT-based conditioning
     
     Args:
@@ -416,7 +416,8 @@ def create_medsegdiff(image_size=224, dim=64, timesteps=1000, loss_type='hybrid'
         input_img_channels=1,
         dim_mult=(1, 2, 4, 8),
         full_self_attn=(False, False, True, True),
-        mid_transformer_depth=0
+        mid_transformer_depth=0,
+        conditioning_fmap_size=conditioning_fmap_size,
     )
     return GaussianDiffusionModel(unet, timesteps=timesteps, objective='predict_x0',
                                  beta_schedule='cosine', loss_type=loss_type)

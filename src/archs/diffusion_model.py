@@ -2,6 +2,7 @@
 Based on supervised_model.py structure with MedSegDiff and BerDiff.
 """
 from copy import deepcopy
+import inspect
 
 import lightning.pytorch as L
 import torch
@@ -44,6 +45,7 @@ class DiffusionModel(L.LightningModule):
         log_image_enabled: bool = False,
         log_image_names: list = None,
         loss_type: str = 'hybrid',
+        conditioning_fmap_size: int | None = None,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -69,12 +71,18 @@ class DiffusionModel(L.LightningModule):
             raise ValueError(f"Unknown architecture: {arch_name}. Choose from {list(GLOBAL_MODEL_REGISTRY.keys())}")
 
         create_fn = GLOBAL_MODEL_REGISTRY.get(arch_name)
-        self.diffusion_model = create_fn(
-            image_size=image_size,
-            dim=dim,
-            timesteps=timesteps,
-            loss_type=loss_type,
-        )
+        create_kwargs = {
+            'image_size': image_size,
+            'dim': dim,
+            'timesteps': timesteps,
+            'loss_type': loss_type,
+        }
+        if conditioning_fmap_size is not None:
+            create_kwargs['conditioning_fmap_size'] = conditioning_fmap_size
+        # Only pass supported args to factory
+        sig = inspect.signature(create_fn)
+        create_kwargs = {k: v for k, v in create_kwargs.items() if k in sig.parameters}
+        self.diffusion_model = create_fn(**create_kwargs)
 
         # EMA model for stable inference
         self.use_ema = use_ema

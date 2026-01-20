@@ -1,12 +1,14 @@
-# OCTA500 6M 데이터셋 - BerDiff (Bernoulli Diffusion) 학습 설정
+# OCTA500 6M 데이터셋 - ColdDiff 학습 설정
 model:
-  arch_name: berdiff
+  arch_name: colddiff
   image_size: 224
-  dim: 40
+  dim: 24
+  channel_mult: [1, 2, 3, 4]
   timesteps: 100
+  loss_type: hybrid
   learning_rate: 0.0002
   weight_decay: 0.00001
-  experiment_name: berdiff
+  experiment_name: colddiff
   data_name: octa500_6m
   num_ensemble: 1
   use_ema: true
@@ -24,13 +26,13 @@ data:
   test_dir: data/OCTA500_6M/test
   crop_size: 224
   train_bs: 6
+  num_workers: 8
   num_samples_per_image: 16
-
 trainer:
   max_epochs: 500
   accelerator: gpu
   devices: 1
-  precision: 32-true  # Binomial distribution은 FP32 필요
+  precision: 32-true  # Diffusion은 FP32 필요
   enable_progress_bar: false
   check_val_every_n_epoch: 25
   accumulate_grad_batches: 8

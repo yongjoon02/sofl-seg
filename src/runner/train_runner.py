@@ -297,6 +297,7 @@ class TrainRunner:
                 num_ensemble=self.model_cfg.get('num_ensemble', 1),
                 log_image_enabled=self.model_cfg.get('log_image_enabled', False),
                 log_image_names=self.model_cfg.get('log_image_names', None),
+                use_sliding_infer=self.model_cfg.get('use_sliding_infer', True),
                 model_channels=self.model_cfg.get('model_channels', 32),
                 channel_mult=self.model_cfg.get('channel_mult', [1,2,4,8]),
                 channel_mult_emb=self.model_cfg.get('channel_mult_emb', 4),

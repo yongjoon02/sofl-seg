@@ -1,39 +1,44 @@
-# XCA 데이터셋 - Flow Matching 학습 설정 (SAUNA soft label)
+# XCA 데이터셋 - Flow Matching (MedSegDiff multitask backbone, SAUNA soft label)
 model:
-  arch_name: dhariwal_concat_unet
+  arch_name: medsegdiff_flow_multitask
   image_size: 320
   patch_plan:
     - [320, 1]
   dim: 32
-  timesteps: 30
+  timesteps: 50
   num_ensemble: 1
   sigma: 0.25
+  use_sliding_infer: true
   learning_rate: 0.0002
   weight_decay: 0.00001
+  use_ema: true
+  ema_decay: 0.9999
   num_classes: 2
-  experiment_name: flow_model_sauna
+  experiment_name: flow_model_medsegdiff_multitask
   data_name: xca
-  log_image_enabled: false
+  log_image_enabled: true
   log_image_names:
     - '0000.png'
     - '0010.png'
     - '0019.png'
-  # UNet architecture parameters
+  # UNet architecture parameters (mapped to MedSegDiff backbone)
+  # model_channels must be divisible by 8 (GroupNorm requirement)
+  # Reduced to ~14M params (similar to berdiff) for fair comparison
   model_channels: 32
-  channel_mult: [1, 2, 4, 8]
+  channel_mult: [1, 2, 3, 4]
   channel_mult_emb: 4
   num_blocks: 3
+  # Match attention to actual feature map resolutions: 320 -> 160 -> 80 -> 40
   attn_resolutions: [80, 40]
   dropout: 0.0
   label_dim: 0
   augment_dim: 0
-  # Loss configuration for SAUNA soft labels (registry-based)
+
   loss:
     name: flow_matching
     params:
-      scheme: l2_l1geo
-      weights:
-        l1geo: 0.1
+      scheme: l2
+
 data:
   name: xca
   train_dir: data/xca_full/train
@@ -41,8 +46,8 @@ data:
   test_dir: data/xca_full/test
   train_bs: 6  # DDP: 각 GPU당 1 → 총 6 GPU × 1 = 6
   image_size: 320
-  num_samples_per_image: 4  # 메모리 최적화
-  use_sauna_transform: true  # Enable SAUNA dynamic transformation
+  num_samples_per_image: 16  # 메모리 최적화
+  use_sauna_transform: true 
 
 trainer:
   max_epochs: 500
@@ -50,7 +55,7 @@ trainer:
   devices: 1
   precision: 32-true
   enable_progress_bar: true
-  check_val_every_n_epoch: 25
+  check_val_every_n_epoch: 10
   accumulate_grad_batches: 8  # 실효 배치: 6 GPU × 1 × 8 = 48
   log_every_n_steps: 10
   gradient_clip_val: 1.0

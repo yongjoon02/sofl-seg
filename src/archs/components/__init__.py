@@ -15,14 +15,18 @@ from .csnet import CSNet
 from .dscnet import DSCNet
 from . import unet  # Register flow matching architectures
 from . import medsegdiff_flow  # Register MedSegDiff-based flow backbone
+from . import medsegdiff_flow_multitask  # Register MedSegDiff-based multi-task flow backbone
 from . import segdiff_flow  # Register SegDiff-based flow backbone
 from . import nnunet_model  # Register nnUNet-style supervised backbone
+from . import cold_diffusion  # Cold Diffusion factory
 
 __all__ = [
     'CSNet',
     'DSCNet',
     'unet',
     'medsegdiff_flow',
+    'medsegdiff_flow_multitask',
     'segdiff_flow',
     'nnunet_model',
+    'cold_diffusion',
 ]
