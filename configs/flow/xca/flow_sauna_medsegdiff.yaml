@@ -1,6 +1,38 @@
 # XCA 데이터셋 - Flow Matching (MedSegDiff backbone, SAUNA soft label)
 model:
   arch_name: medsegdiff_flow
+  mode: dfm_binary
+  dfm_sampler: euler   # 또는 heun
+  dfm_eps: 1e-6
+  debug_dfm: false
+
+  use_vlm_film: true
+  vlm_film_decoder_stages: [2, 3]  # 후반 2개 스테이지 (64ch, 32ch)에만 적용
+  vlm_film_config:
+    model_name: "Qwen/Qwen2.5-VL-3B-Instruct"
+    cond_dim: 256
+    cache_dir: "cache/vlm_profiles"
+    # FiLM parameters (deprecated - using unconstrained γ=1+Linear(c), β=Linear(c))
+    gamma_scale: 0.1  # Not used: identity-init allows unbounded learning
+    beta_scale: 0.1   # Not used: identity-init allows unbounded learning
+    cond_layernorm: true  # Not used: removed from new implementation
+    film_debug_enabled: true
+    film_debug_every_n_steps_train: 50   # 원하는 주기
+    film_debug_every_n_steps_val: 20
+  
+  # Junction-aware FiLM gating (topology safety gate)
+  # Controls spatial application of VLM-FiLM modulation to reduce false positives at vessel junctions
+  junction_gating_config:
+    enabled: true                    
+    warmup_epochs: 20               
+    source: "pred"               
+    threshold: 0.5               
+    degree_threshold: 3          
+    radius_px: 8               
+    gate_value_in_junction: 0.0    
+    apply_stages: "same_as_film"    
+    interp: "nearest"              
+
   image_size: 320
   patch_plan:
     - [320, 1]
@@ -33,6 +65,7 @@ model:
   dropout: 0.0
   label_dim: 0
   augment_dim: 0
+  use_gradient_checkpointing: true
 
   loss:
     name: flow_matching
@@ -44,18 +77,18 @@ data:
   train_dir: data/xca_full/train
   val_dir: data/xca_full/val
   test_dir: data/xca_full/test
-  train_bs: 6  # DDP: 각 GPU당 1 → 총 6 GPU × 1 = 6
+  train_bs: 6  # VLM-FiLM 메모리 고려하여 4 유지
   image_size: 320
   num_samples_per_image: 16  # 메모리 최적화
-  use_sauna_transform: true 
+  use_sauna_transform: false
 
 trainer:
   max_epochs: 500
   accelerator: gpu
   devices: 1
-  precision: 32-true
+  precision: 16-mixed
   enable_progress_bar: true
-  check_val_every_n_epoch: 10
-  accumulate_grad_batches: 8  # 실효 배치: 6 GPU × 1 × 8 = 48
+  check_val_every_n_epoch: 15
+  accumulate_grad_batches: 8  # 실효 배치: 4 × 12 = 48 (기본 DFM과 동일)
   log_every_n_steps: 10
   gradient_clip_val: 1.0

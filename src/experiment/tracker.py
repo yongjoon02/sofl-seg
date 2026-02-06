@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import yaml
+from src.utils.config import save_config
 
 
 @dataclass
@@ -133,8 +133,7 @@ class ExperimentTracker:
 
         # Save config to experiment directory
         config_path = exp_dir / "config.yaml"
-        with open(config_path, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False)
+        save_config(config, config_path)
 
         # Save git info
         if git_hash:
@@ -157,6 +156,13 @@ class ExperimentTracker:
 
         self.db[exp_id].update(kwargs)
         self._save_db()
+
+    def get_experiment_config(self, exp_id: str) -> Optional[Dict[str, Any]]:
+        """Get stored config for an experiment ID if available."""
+        exp = self.db.get(exp_id)
+        if not exp:
+            return None
+        return exp.get('config')
 
     def finish_experiment(
         self,

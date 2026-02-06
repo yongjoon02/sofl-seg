@@ -1,0 +1,6 @@
+# VLM-FiLM conditioning optional dependencies (soft-seg baseline)
+transformers>=4.37.0
+accelerate>=0.26.0
+pillow>=9.0.0
+numpy>=1.21.0
+# torch / torchvision / lightning assumed present

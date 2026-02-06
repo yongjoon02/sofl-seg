@@ -5,11 +5,12 @@ model:
   dim: 32
   channel_mult: [1, 2, 3, 4]
   timesteps: 50
-  loss_type: hybrid
+  loss_type: mse
   learning_rate: 0.0002
   weight_decay: 0.00001
   experiment_name: colddiff
   data_name: xca
+  conditioning_fmap_size: 224
   num_ensemble: 1
   use_ema: true
   ema_decay: 0.9999

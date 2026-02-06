@@ -311,7 +311,18 @@ class TrainRunner:
                 bce_weight=self.model_cfg.get('bce_weight', 0.5),
                 l2_weight=self.model_cfg.get('l2_weight', 0.1),
                 dice_weight=self.model_cfg.get('dice_weight', 0.2),
+                lambda_soft=self.model_cfg.get('lambda_soft', 1.0),
                 loss=self.model_cfg.get('loss', None),
+                use_gradient_checkpointing=self.model_cfg.get('use_gradient_checkpointing', False),
+                mode=self.model_cfg.get('mode', 'cfm_continuous'),
+                dfm_sampler=self.model_cfg.get('dfm_sampler', 'euler'),
+                dfm_eps=self.model_cfg.get('dfm_eps', 1e-6),
+                debug_dfm=self.model_cfg.get('debug_dfm', False),
+                # VLM-FiLM conditioning (soft-seg port)
+                use_vlm_film=self.model_cfg.get('use_vlm_film', False),
+                vlm_film_config=self.model_cfg.get('vlm_film_config', None),
+                vlm_update_interval=self.model_cfg.get('vlm_update_interval', 50),
+                vlm_update_interval_eval=self.model_cfg.get('vlm_update_interval_eval', 1),
             )
         elif self.model_info.task == 'supervised':
             # SupervisedModel uses img_size instead of image_size

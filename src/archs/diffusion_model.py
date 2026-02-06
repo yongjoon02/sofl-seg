@@ -3,8 +3,11 @@ Based on supervised_model.py structure with MedSegDiff and BerDiff.
 """
 from copy import deepcopy
 import inspect
+from pathlib import Path
 
 import lightning.pytorch as L
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 import torch
 from monai.inferers import SlidingWindowInferer
 from torchmetrics import MetricCollection
@@ -133,6 +136,196 @@ class DiffusionModel(L.LightningModule):
             'betti_1_error': Betti1Error(),
         })
 
+        self.eval_save_intermediate = False
+        self.eval_intermediate_dir = None
+        self.eval_intermediate_t = None
+        self.eval_intermediate_steps = None
+        self.eval_intermediate_max_samples = 0
+        self._eval_intermediate_saved = set()
+
+    def _parse_sample_name(self, sample_name: str) -> str:
+        name = str(sample_name)
+        if '/' in name:
+            name = name.split('/')[-1]
+        if '.' in name:
+            name = name.rsplit('.', 1)[0]
+        return name
+
+    def _select_intermediate_indices(self, sample_names: list) -> list:
+        max_samples = int(getattr(self, 'eval_intermediate_max_samples', 0) or 0)
+        if max_samples <= 0:
+            return list(range(len(sample_names)))
+        indices = []
+        for i, name in enumerate(sample_names):
+            key = self._parse_sample_name(name)
+            if key in self._eval_intermediate_saved:
+                continue
+            indices.append(i)
+            self._eval_intermediate_saved.add(key)
+            if len(indices) >= max_samples:
+                break
+        return indices
+
+    def _resolve_intermediate_steps(self, num_timesteps: int) -> list:
+        steps = getattr(self, 'eval_intermediate_steps', None)
+        if steps:
+            return [int(s) for s in steps if 0 <= int(s) < num_timesteps]
+        t_list = getattr(self, 'eval_intermediate_t', None)
+        if not t_list:
+            return []
+        resolved = []
+        for t in t_list:
+            t_val = max(0.0, min(1.0, float(t)))
+            idx = int(round(t_val * (num_timesteps - 1)))
+            resolved.append(idx)
+        return sorted(set(resolved))
+
+    def _save_intermediate_images(
+        self,
+        sample_names: list,
+        steps_dict: dict,
+        out_dir: str,
+        labels: list | None,
+    ) -> None:
+        out_path = Path(out_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+        # 추가: binary mask 저장용 폴더
+        out_path_binary = out_path.parent / (out_path.name + "_binary")
+        out_path_binary.mkdir(parents=True, exist_ok=True)
+        print(f"[DEBUG] Saving intermediate images to: {out_path}", flush=True)
+        print(f"[DEBUG] Saving binary intermediate images to: {out_path_binary}", flush=True)
+
+        if not steps_dict:
+            print(f"[DEBUG] steps_dict is empty! No intermediate steps to save.", flush=True)
+        else:
+            print(f"[DEBUG] steps_dict keys: {list(steps_dict.keys())}", flush=True)
+        ordered_steps = sorted(steps_dict.keys())
+        for i, name in enumerate(sample_names):
+            sample_dir = out_path / self._parse_sample_name(name)
+            sample_dir.mkdir(parents=True, exist_ok=True)
+            # binary 저장용
+            sample_dir_binary = out_path_binary / self._parse_sample_name(name)
+            sample_dir_binary.mkdir(parents=True, exist_ok=True)
+            print(f"[DEBUG] Sample {i}: {name} -> {sample_dir}, binary: {sample_dir_binary}", flush=True)
+
+            row_imgs = []
+            row_imgs_binary = []
+            per_tile_labels = []
+            for idx, step_idx in enumerate(ordered_steps):
+                step_tensor = steps_dict.get(step_idx)
+                if not torch.is_tensor(step_tensor):
+                    print(f"[DEBUG] step_tensor for step {step_idx} is not a tensor!", flush=True)
+                    continue
+                img = step_tensor[i].detach().float().cpu()
+                if img.dim() == 3:
+                    img = img.squeeze(0)
+                img = img.clamp(0.0, 1.0)
+                # soft mask 저장
+                img_soft = (img.numpy() * 255.0).astype(np.uint8)
+                img_soft = img_soft.T
+                row_imgs.append(img_soft)
+                # binary mask 저장
+                img_binary = (img > 0.5).numpy().astype(np.uint8) * 255
+                img_binary = img_binary.T
+                row_imgs_binary.append(img_binary)
+                # 개별 step 저장 (binary)
+                pil_binary = Image.fromarray(img_binary, mode='L')
+                binary_path = sample_dir_binary / f"step_{step_idx}.png"
+                try:
+                    pil_binary.save(binary_path)
+                    print(f"[DEBUG] Saved binary mask: {binary_path}", flush=True)
+                except Exception as e:
+                    print(f"[ERROR] Failed to save binary mask: {binary_path}, error: {e}", flush=True)
+
+                if labels is not None and idx < len(labels):
+                    per_tile_labels.append(labels[idx])
+                else:
+                    per_tile_labels.append(f"step={int(step_idx)}")
+            # soft mask row 저장 (기존)
+            if row_imgs:
+                row = np.concatenate(row_imgs, axis=1)
+                tile_h, tile_w = row_imgs[0].shape
+                font_size = max(12, int(tile_h * 0.08))
+                font = None
+                for path in (
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+                ):
+                    try:
+                        font = ImageFont.truetype(path, font_size)
+                        break
+                    except Exception:
+                        continue
+                if font is None:
+                    font = ImageFont.load_default()
+                tmp = Image.new("L", (1, 1), color=255)
+                draw_tmp = ImageDraw.Draw(tmp)
+                text_heights = [draw_tmp.textbbox((0, 0), label, font=font)[3] for label in per_tile_labels]
+                top_margin = (max(text_heights) if text_heights else font_size) + 6
+                canvas = Image.new("L", (row.shape[1], row.shape[0] + top_margin), color=255)
+                canvas.paste(Image.fromarray(row, mode="L"), (0, top_margin))
+                draw = ImageDraw.Draw(canvas)
+                for idx, label in enumerate(per_tile_labels):
+                    x0 = idx * tile_w
+                    x1 = x0 + tile_w
+                    bbox = draw.textbbox((0, 0), label, font=font)
+                    text_w = bbox[2] - bbox[0]
+                    x = x0 + (tile_w - text_w) // 2
+                    y = 2
+                    draw.text((x, y), label, fill=0, font=font)
+                canvas.save(sample_dir / "steps_row.png")
+            # binary mask row 저장
+            if row_imgs_binary:
+                row_binary = np.concatenate(row_imgs_binary, axis=1)
+                canvas_binary = Image.new("L", (row_binary.shape[1], row_binary.shape[0] + top_margin), color=255)
+                canvas_binary.paste(Image.fromarray(row_binary, mode="L"), (0, top_margin))
+                draw_binary = ImageDraw.Draw(canvas_binary)
+                for idx, label in enumerate(per_tile_labels):
+                    x0 = idx * tile_w
+                    x1 = x0 + tile_w
+                    bbox = draw_binary.textbbox((0, 0), label, font=font)
+                    text_w = bbox[2] - bbox[0]
+                    x = x0 + (tile_w - text_w) // 2
+                    y = 2
+                    draw_binary.text((x, y), label, fill=0, font=font)
+                canvas_binary.save(sample_dir_binary / "steps_row.png")
+
+    def _maybe_save_intermediate_eval(self, images: torch.Tensor, sample_names: list) -> None:
+        if not getattr(self, 'eval_save_intermediate', False):
+            return
+        if hasattr(self, 'trainer') and hasattr(self.trainer, 'is_global_zero') and not self.trainer.is_global_zero:
+            return
+        out_dir = getattr(self, 'eval_intermediate_dir', None)
+        if not out_dir:
+            return
+        indices = self._select_intermediate_indices(sample_names)
+        if not indices:
+            return
+        model = self.ema_model if (self.use_ema and self.ema_model is not None) else self.diffusion_model
+        num_timesteps = int(getattr(model, 'num_timesteps', 0))
+        if num_timesteps <= 0:
+            return
+        save_steps = self._resolve_intermediate_steps(num_timesteps)
+        if not save_steps:
+            return
+        label_list = None
+        if self.eval_intermediate_t:
+            label_list = []
+            idx_map = {}
+            for t in self.eval_intermediate_t:
+                t_val = max(0.0, min(1.0, float(t)))
+                idx = int(round(t_val * (num_timesteps - 1)))
+                if idx not in idx_map:
+                    idx_map[idx] = f"t={t_val:.2f}"
+            for step_idx in sorted(save_steps):
+                label_list.append(idx_map.get(step_idx, f"step={int(step_idx)}"))
+        subset_images = images[indices]
+        subset_names = [sample_names[i] for i in indices]
+        sample_out = model.sample(subset_images, save_steps=save_steps)
+        steps_dict = sample_out.get('steps', {}) if isinstance(sample_out, dict) else {}
+        if steps_dict:
+            self._save_intermediate_images(subset_names, steps_dict, out_dir, label_list)
+
     def forward(self, img: torch.Tensor, cond_img: torch.Tensor) -> torch.Tensor:
         """Forward pass - returns loss during training.
         
@@ -199,8 +392,12 @@ class DiffusionModel(L.LightningModule):
         if self.use_ema:
             self.update_ema()
 
+
     def validation_step(self, batch, batch_idx):
         images, labels = batch['image'], batch['label']
+
+        # Get sample names if available (fix for NameError)
+        sample_names = batch.get('name', [f'sample_{batch_idx}_{i}' for i in range(images.shape[0])])
 
         # Convert labels for metrics
         if labels.dim() == 4 and labels.shape[1] == 1:

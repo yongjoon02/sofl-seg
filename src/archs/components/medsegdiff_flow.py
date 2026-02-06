@@ -46,6 +46,7 @@ class MedSegDiffFlow(nn.Module):
         label_dim: int = 0,  # unused
         augment_dim: int = 0,  # unused
         time_scale: float = 1000.0,  # scale flow t (0-1) to diffusion-style range
+        use_gradient_checkpointing: bool = False,
         **_,
     ):
         super().__init__()
@@ -66,12 +67,13 @@ class MedSegDiffFlow(nn.Module):
             dim_mult=tuple(channel_mult),
             full_self_attn=full_self_attn,
             mid_transformer_depth=1,
+            use_gradient_checkpointing=use_gradient_checkpointing,
         )
 
-    def forward(self, x, time, cond):
+    def forward(self, x, time, cond, vlm_cond: dict | None = None, vlm_film_heads=None):
         # Scale [0,1] flow time to diffusion-style embedding range
         if isinstance(time, torch.Tensor):
             time_in = time * self.time_scale
         else:
             time_in = time * self.time_scale
-        return self.base_unet(x, time_in, cond)
+        return self.base_unet(x, time_in, cond, vlm_cond=vlm_cond, vlm_film_heads=vlm_film_heads)

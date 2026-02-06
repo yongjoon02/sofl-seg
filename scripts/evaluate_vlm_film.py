@@ -25,7 +25,7 @@ import autorootcwd
 import click
 from pathlib import Path
 
-from src.runner.eval_runner import EvalRunner
+from src.runner.eval_runner_vlm_film import EvalRunnerVLMFiLM
 from src.registry.models import MODEL_REGISTRY
 from src.registry.datasets import DATASET_REGISTRY
 
@@ -37,14 +37,7 @@ from src.registry.datasets import DATASET_REGISTRY
 @click.option('--gpu', default=None, type=int, help='GPU index to use (default: None=CPU)')
 @click.option('--save-predictions/--no-save-predictions', default=True, help='Save prediction images (default: True)')
 @click.option('--checkpoint', default=None, help='Path to specific checkpoint file (overrides auto-detection)')
-def main(
-    data,
-    models,
-    output,
-    gpu,
-    save_predictions,
-    checkpoint,
-):
+def main(data, models, output, gpu, save_predictions, checkpoint):
     """Evaluate trained models on test data."""
     
     # Validate dataset
@@ -78,11 +71,11 @@ def main(
             return
     
     # Create runner
-    runner = EvalRunner(
+    runner = EvalRunnerVLMFiLM(
         dataset=data,
         output_dir=output,
         gpu=gpu,
-        save_predictions=save_predictions,
+        save_predictions=save_predictions
     )
     
     # Run evaluation

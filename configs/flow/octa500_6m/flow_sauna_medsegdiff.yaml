@@ -1,0 +1,65 @@
+# OCTA500 6M 데이터셋 - Flow Matching (MedSegDiff backbone, SAUNA soft label)
+model:
+  arch_name: medsegdiff_flow
+  mode: dfm_binary
+  dfm_sampler: euler   # 또는 heun
+  dfm_eps: 1e-6
+  debug_dfm: false
+
+  image_size: 224
+  patch_plan:
+    - [224, 1]
+  dim: 32
+  timesteps: 50
+  num_ensemble: 1
+  sigma: 0.25
+  use_sliding_infer: true
+  learning_rate: 0.0002
+  weight_decay: 0.00001
+  use_ema: true
+  ema_decay: 0.9999
+  num_classes: 2
+  experiment_name: flow_model_medsegdiff
+  data_name: octa500_6m
+  log_image_enabled: true
+  log_image_names:
+    - '10181.bmp'
+    - '10185.bmp'
+    - '10190.bmp'
+  # UNet architecture parameters (mapped to MedSegDiff backbone)
+  # model_channels must be divisible by 8 (GroupNorm requirement)
+  # Reduced to ~14M params (similar to berdiff) for fair comparison
+  model_channels: 32
+  channel_mult: [1, 2, 3, 4]
+  channel_mult_emb: 4
+  num_blocks: 3
+  # Match attention to actual feature map resolutions: 224 -> 112 -> 56 -> 28
+  attn_resolutions: [56, 28]
+  dropout: 0.0
+  label_dim: 0
+  augment_dim: 0
+
+  loss:
+    name: flow_matching
+    params:
+      scheme: l2
+
+data:
+  name: octa500_6m
+  train_dir: data/OCTA500_6M/train
+  val_dir: data/OCTA500_6M/val
+  test_dir: data/OCTA500_6M/test
+  train_bs: 6
+  crop_size: 224
+  num_samples_per_image: 16
+
+trainer:
+  max_epochs: 500
+  accelerator: gpu
+  devices: 1
+  precision: 32-true
+  enable_progress_bar: true
+  check_val_every_n_epoch: 15
+  accumulate_grad_batches: 8
+  log_every_n_steps: 10
+  gradient_clip_val: 1.0

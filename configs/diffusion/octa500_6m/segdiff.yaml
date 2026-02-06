@@ -1,14 +1,12 @@
-# OCTA500 6M 데이터셋 - ColdDiff 학습 설정
+# OCTA500 6M dataset - SegDiff training config
 model:
-  arch_name: colddiff
+  arch_name: segdiff
   image_size: 224
-  dim: 24
-  channel_mult: [1, 2, 3, 4]
+  dim: 32
   timesteps: 50
-  loss_type: hybrid
   learning_rate: 0.0002
   weight_decay: 0.00001
-  experiment_name: colddiff
+  experiment_name: segdiff
   data_name: octa500_6m
   num_ensemble: 1
   use_ema: true
@@ -18,6 +16,7 @@ model:
     - '10181.bmp'
     - '10185.bmp'
     - '10190.bmp'
+  loss_type: mse
 
 data:
   name: octa500_6m
@@ -28,11 +27,12 @@ data:
   train_bs: 6
   num_workers: 8
   num_samples_per_image: 16
+
 trainer:
   max_epochs: 500
   accelerator: gpu
   devices: 1
-  precision: 32-true  # Diffusion은 FP32 필요
+  precision: 32-true  # Diffusion needs FP32
   enable_progress_bar: false
   check_val_every_n_epoch: 25
   accumulate_grad_batches: 8

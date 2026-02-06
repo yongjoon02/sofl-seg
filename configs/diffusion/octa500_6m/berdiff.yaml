@@ -2,8 +2,8 @@
 model:
   arch_name: berdiff
   image_size: 224
-  dim: 40
-  timesteps: 100
+  dim: 64
+  timesteps: 50
   learning_rate: 0.0002
   weight_decay: 0.00001
   experiment_name: berdiff
@@ -11,7 +11,7 @@ model:
   num_ensemble: 1
   use_ema: true
   ema_decay: 0.9999
-  log_image_enabled: true
+  log_image_enabled: false
   log_image_names:
     - '10181.bmp'
     - '10185.bmp'
@@ -24,6 +24,7 @@ data:
   test_dir: data/OCTA500_6M/test
   crop_size: 224
   train_bs: 6
+  num_workers: 8
   num_samples_per_image: 16
 
 trainer:

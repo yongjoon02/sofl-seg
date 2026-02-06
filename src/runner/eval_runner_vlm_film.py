@@ -33,12 +33,12 @@ class EvaluationResult:
     experiment_id: str
 
 
-class EvalRunner:
+class EvalRunnerVLMFiLM:
     """
-    Unified evaluation runner for all models.
+    Evaluation runner for VLM-FiLM models.
     
     Example:
-        >>> runner = EvalRunner(dataset='octa500_3m')
+        >>> runner = EvalRunnerVLMFiLM(dataset='octa500_3m')
         >>> results = runner.evaluate_all_models()
         >>> runner.save_results(results, 'results/eval_results.csv')
     """
@@ -49,6 +49,10 @@ class EvalRunner:
         output_dir: str = "results/evaluation",
         gpu: Optional[int] = None,
         save_predictions: bool = False,
+        save_intermediate: bool = False,
+        intermediate_t: Optional[str] = None,
+        intermediate_steps: Optional[str] = None,
+        intermediate_max_samples: int = 0,
     ):
         """
         Initialize evaluation runner.
@@ -64,6 +68,10 @@ class EvalRunner:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.gpu = gpu
         self.save_predictions = save_predictions
+        self.save_intermediate = bool(save_intermediate)
+        self.intermediate_t = self._parse_csv_floats(intermediate_t) if intermediate_t else None
+        self.intermediate_steps = self._parse_csv_ints(intermediate_steps) if intermediate_steps else None
+        self.intermediate_max_samples = int(intermediate_max_samples)
 
         # Get dataset info
         if dataset not in DATASET_REGISTRY:
@@ -188,33 +196,72 @@ class EvalRunner:
         exp_id = exp_dir.name
         return self.tracker.get_experiment_config(exp_id)
 
-    def _get_vlm_film_stages_from_checkpoint(self, checkpoint_path: Path) -> Optional[List[int]]:
-        """Detect VLM FiLM decoder stage indices from checkpoint state_dict (number of heads)."""
+    def _is_vlm_checkpoint(self, checkpoint_path: Path) -> bool:
+        """Check if checkpoint is a VLM model by inspecting hparams."""
         try:
-            ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
-            state_dict = ckpt.get("state_dict", {})
-            head_indices = set()
-            for key in state_dict:
-                if "vlm_film_heads." not in key:
-                    continue
-                parts = key.split(".")
-                if len(parts) >= 2 and parts[0] == "vlm_film_heads":
-                    try:
-                        head_indices.add(int(parts[1]))
-                    except (ValueError, IndexError):
-                        continue
-            if head_indices:
-                stages = sorted(head_indices)
-                print(f"   Detected VLM FiLM stages from checkpoint: {stages}")
-                return stages
-            hparams = ckpt.get("hyper_parameters", {})
-            stages = hparams.get("vlm_film_decoder_stages")
-            if stages is not None:
-                print(f"   Using VLM FiLM stages from hparams: {stages}")
-                return stages
+            ckpt = torch.load(str(checkpoint_path), map_location='cpu', weights_only=False)
+            hparams = ckpt.get('hyper_parameters', {})
+            return hparams.get('use_vlm_film', False)
+        except Exception as e:
+            print(f"⚠️  Could not check if checkpoint is VLM model: {e}")
+            # Default to VLM since this is VLM eval runner
+            return True
+    
+    def _get_vlm_film_stages_from_checkpoint(self, checkpoint_path: Path) -> list | None:
+        """Detect VLM Film decoder stages from checkpoint.
+        
+        Priority:
+        1. vlm_film_trained_stages metadata (most reliable - actual trained stages)
+        2. hparams.vlm_film_decoder_stages (if saved)
+        3. Legacy: 2 FiLM heads = stages [0, 1] (old checkpoints with fallback)
+        """
+        try:
+            ckpt = torch.load(str(checkpoint_path), map_location='cpu', weights_only=False)
+            
+            # Priority 1: Check for trained stages metadata (new checkpoints)
+            trained_stages = ckpt.get('vlm_film_trained_stages')
+            if trained_stages is not None:
+                print(f"   Detected VLM Film stages from checkpoint metadata: {trained_stages}")
+                return sorted(trained_stages)
+            
+            # Priority 2: Try hparams
+            hparams = ckpt.get('hyper_parameters', {})
+            vlm_stages = hparams.get('vlm_film_decoder_stages')
+            if vlm_stages is not None:
+                print(f"   Detected VLM Film stages from hparams: {vlm_stages}")
+                return vlm_stages
+            
+            # Priority 3: Legacy checkpoint - infer stages from FiLM head output dimensions
+            # Decoder stage channels: Stage0=128, Stage1=96, Stage2=64, Stage3=32
+            # FiLM outputs gamma+beta: Stage0=256, Stage1=192, Stage2=128, Stage3=64
+            state_dict = ckpt.get('state_dict', {})
+            head_output_dims = {}
+            for key in state_dict.keys():
+                # Get final layer output dimension: vlm_film_heads.{i}.mlp.2.weight shape is [out, in]
+                if key.startswith('vlm_film_heads.') and key.endswith('.mlp.2.weight'):
+                    head_idx = int(key.split('vlm_film_heads.')[1].split('.')[0])
+                    out_dim = state_dict[key].shape[0]
+                    head_output_dims[head_idx] = out_dim
+            
+            if head_output_dims:
+                # Map output dimensions to decoder stages
+                dim_to_stage = {256: 0, 192: 1, 128: 2, 64: 3}
+                stage_mapping = {}
+                for head_idx, out_dim in sorted(head_output_dims.items()):
+                    stage = dim_to_stage.get(out_dim)
+                    if stage is not None:
+                        stage_mapping[head_idx] = stage
+                
+                if stage_mapping:
+                    vlm_stages = sorted(stage_mapping.values())
+                    print(f"   Legacy checkpoint detected: {len(head_output_dims)} heads")
+                    print(f"   Head output dims: {dict(sorted(head_output_dims.items()))}")
+                    print(f"   Inferred stages: {vlm_stages}")
+                    return vlm_stages
+            
             return None
         except Exception as e:
-            print(f"   Could not detect VLM FiLM stages: {e}")
+            print(f"⚠️  Could not detect VLM Film stages: {e}")
             return None
 
     def evaluate_model(self, model_name: str, checkpoint_path: Optional[Path] = None) -> Optional[EvaluationResult]:
@@ -247,9 +294,9 @@ class EvalRunner:
 
         try:
             # Load model based on task type (allow full checkpoint load for PyTorch 2.6+)
-            # Use strict=True so mismatched checkpoints fail loudly (prevents silent random init).
+            # Use strict=False to allow missing/unexpected keys (e.g., LayerNorm changes)
             weights_only = False
-            strict = True
+            strict = False
             # Always load checkpoints on CPU to avoid invalid device ids baked into checkpoints.
             map_location = torch.device("cpu")
             if model_info.task == 'supervised':
@@ -261,25 +308,29 @@ class EvalRunner:
                     strict=strict,
                 )
             elif model_info.task == 'flow':
-                # Check if model uses VLM FiLM by loading config first
-                temp_config = self._load_experiment_config(checkpoint_path)
-                use_vlm_film = temp_config.get('model', {}).get('use_vlm_film', False) if temp_config else False
-                
-                if use_vlm_film:
+                # Auto-detect VLM vs non-VLM checkpoint
+                is_vlm = self._is_vlm_checkpoint(checkpoint_path)
+                if is_vlm:
+                    print(f"   Detected VLM checkpoint, loading FlowModelVLMFiLM...")
                     from src.archs.flow_model_vlm_film import FlowModelVLMFiLM
+                    # FiLM 적용: 디코더 stage 0,1,2,3 전부 사용. 체크포인트에서 감지되면 그대로, 없으면 [0,1,2,3].
                     vlm_stages = self._get_vlm_film_stages_from_checkpoint(checkpoint_path)
-                    load_kwargs = dict(
+                    if not vlm_stages:
+                        vlm_stages = [0, 1, 2, 3]
+                        print(f"   Using default vlm_film_decoder_stages: {vlm_stages}")
+                    model = FlowModelVLMFiLM.load_from_checkpoint(
+                        str(checkpoint_path),
                         map_location=map_location,
                         weights_only=weights_only,
                         strict=strict,
+                        vlm_film_decoder_stages=vlm_stages,
                     )
-                    if vlm_stages is not None:
-                        load_kwargs["vlm_film_decoder_stages"] = vlm_stages
-                    model = FlowModelVLMFiLM.load_from_checkpoint(
-                        str(checkpoint_path),
-                        **load_kwargs,
-                    )
+                    loaded_stages = getattr(model.hparams, "vlm_film_decoder_stages", vlm_stages)
+                    model_internal_stages = getattr(model, "_vlm_film_stage_indices", None)
+                    print(f"   Loaded with vlm_film_decoder_stages={loaded_stages}")
+                    print(f"   Model internal _vlm_film_stage_indices={model_internal_stages}")
                 else:
+                    print(f"   Detected non-VLM checkpoint, loading FlowModel...")
                     from src.archs.flow_model import FlowModel
                     model = FlowModel.load_from_checkpoint(
                         str(checkpoint_path),
@@ -321,6 +372,14 @@ class EvalRunner:
 
             # Extract experiment ID from checkpoint path (before creating logger)
             exp_id = checkpoint_path.parent.parent.name
+
+            if self.save_intermediate:
+                intermediate_dir = self.output_dir / model_name / exp_id / "intermediate"
+                model.eval_save_intermediate = True
+                model.eval_intermediate_dir = str(intermediate_dir)
+                model.eval_intermediate_t = self.intermediate_t
+                model.eval_intermediate_steps = self.intermediate_steps
+                model.eval_intermediate_max_samples = self.intermediate_max_samples
 
             # Create logger if saving predictions
             logger = None

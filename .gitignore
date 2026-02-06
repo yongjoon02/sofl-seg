@@ -121,3 +121,16 @@ experiments/
 logs/
 **/tensorboard/
 **/events.out.tfevents.*
+
+# Large cache directories
+cache/
+debug_dumps/
+backup/
+archive/
+
+# MLflow database backups
+*.db.bak
+
+# Large result files
+results/
+film_analysis_cumulative/

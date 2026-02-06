@@ -3,7 +3,7 @@ model:
   arch_name: medsegdiff
   image_size: 224
   dim: 32
-  timesteps: 100
+  timesteps: 50
   learning_rate: 0.0002
   weight_decay: 0.00001
   experiment_name: medsegdiff
@@ -11,7 +11,7 @@ model:
   num_ensemble: 1
   use_ema: true
   ema_decay: 0.9999
-  log_image_enabled: true
+  log_image_enabled: false
   log_image_names:
     - '10181.bmp'
     - '10185.bmp'

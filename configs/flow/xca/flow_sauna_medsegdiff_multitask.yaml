@@ -38,6 +38,8 @@ model:
     name: flow_matching
     params:
       scheme: l2
+  # Soft branch weight: loss = loss_hard + lambda_soft * loss_soft
+  lambda_soft: 0.1
 
 data:
   name: xca

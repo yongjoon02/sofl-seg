@@ -21,6 +21,7 @@ from torchdiffeq import odeint
 
 from src.registry.base import ARCHS_REGISTRY
 from src.archs.components import unet  # noqa: F401 - Register architectures
+from src.archs.components import medsegdiff_flow_vlm_film  # noqa: F401 - Register VLM-FiLM backbones
 from src.archs.components.flow import SchrodingerBridgeConditionalFlowMatcher
 from src.archs.components.vlm_conditioner import VLMConditioner, AdaptiveFiLMHead
 from src.archs.dfm_binary import (
@@ -50,7 +51,7 @@ class _LossSummaryModule(nn.Module):
     def extra_repr(self) -> str:
         return self.description
 
-class FlowModel(L.LightningModule):
+class FlowModelVLMFiLM(L.LightningModule):
     """Lightning module for flow matching producing binary masks."""
     
     def __init__(
@@ -95,8 +96,11 @@ class FlowModel(L.LightningModule):
         # VLM-FiLM conditioning (soft-seg port)
         use_vlm_film: bool = False,
         vlm_film_config: dict | None = None,
+        vlm_film_decoder_stages: list | None = None,  # e.g., [0,1] or [2,3]. None = [0,1] (Stage 4/3 only)
         vlm_update_interval: int = 50,
         vlm_update_interval_eval: int = 1,
+        # Junction-aware FiLM gating (topology safety gate)
+        junction_gating_config: dict | None = None,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -106,17 +110,27 @@ class FlowModel(L.LightningModule):
             experiment_name = f"{data_name}/{arch_name}"
         self.experiment_name = experiment_name
         self.data_name = data_name
+
+        # VLM-FiLM toggle
         self.use_vlm_film = bool(use_vlm_film)
-        if self.use_vlm_film and arch_name not in {'medsegdiff_flow', 'medsegdiff_flow_multitask'}:
-            raise ValueError("VLM-FiLM is only supported for arch_name='medsegdiff_flow' or 'medsegdiff_flow_multitask'.")
+        arch_name_for_unet = arch_name
+        if self.use_vlm_film:
+            if arch_name == 'medsegdiff_flow':
+                arch_name_for_unet = 'medsegdiff_flow_vlm_film'
+            elif arch_name == 'medsegdiff_flow_multitask':
+                arch_name_for_unet = 'medsegdiff_flow_multitask_vlm_film'
+            elif arch_name in ('medsegdiff_flow_vlm_film', 'medsegdiff_flow_multitask_vlm_film'):
+                arch_name_for_unet = arch_name
+            else:
+                raise ValueError("VLM-FiLM is only supported for medsegdiff_flow backbones.")
         
         # Get model class from registry
-        if arch_name not in ARCHS_REGISTRY:
-            raise ValueError(f"Unknown architecture: {arch_name}. Available: {list(ARCHS_REGISTRY.keys())}")
+        if arch_name_for_unet not in ARCHS_REGISTRY:
+            raise ValueError(f"Unknown architecture: {arch_name_for_unet}. Available: {list(ARCHS_REGISTRY.keys())}")
         
-        arch_class = ARCHS_REGISTRY.get(arch_name)
+        arch_class = ARCHS_REGISTRY.get(arch_name_for_unet)
 
-        self.is_multitask = arch_name == 'medsegdiff_flow_multitask'
+        self.is_multitask = arch_name in ('medsegdiff_flow_multitask', 'medsegdiff_flow_multitask_vlm_film')
         
         self.use_geometry_head = arch_name == 'dhariwal_concat_unet_multihead'
 
@@ -131,7 +145,12 @@ class FlowModel(L.LightningModule):
 
         # For dhariwal_concat_unet, need mask_channels and input_img_channels
         arch_kwargs = {}
-        if arch_name in {'medsegdiff_flow', 'medsegdiff_flow_multitask'}:
+        if arch_name_for_unet in {
+            'medsegdiff_flow',
+            'medsegdiff_flow_multitask',
+            'medsegdiff_flow_vlm_film',
+            'medsegdiff_flow_multitask_vlm_film',
+        }:
             arch_kwargs['use_gradient_checkpointing'] = use_gradient_checkpointing
 
         if arch_name in {'dhariwal_concat_unet', 'dhariwal_concat_unet_multihead'}:
@@ -195,6 +214,20 @@ class FlowModel(L.LightningModule):
                 vlm_cache_stats_every_n_steps=vlm_config.get("vlm_cache_stats_every_n_steps", 200),
             )
             decoder_channels = [model_channels * m for m in channel_mult][::-1]
+            
+            # Select decoder stages to apply VLM-FiLM
+            if vlm_film_decoder_stages is not None:
+                selected_stages = sorted(vlm_film_decoder_stages)
+                selected_channels = [decoder_channels[i] for i in selected_stages if i < len(decoder_channels)]
+                self._vlm_film_stage_indices = selected_stages
+                print(f"[VLM-FiLM] Applying to decoder stages: {selected_stages}")
+            else:
+                # Default: Stage 4/3 only (indices 0, 1)
+                selected_stages = [0, 1]
+                selected_channels = decoder_channels[:2]
+                self._vlm_film_stage_indices = selected_stages
+                print(f"[VLM-FiLM] Applying to default stages (Stage 4/3): {selected_stages}")
+            
             self.vlm_film_heads = nn.ModuleList([
                 AdaptiveFiLMHead(
                     cond_dim=vlm_config.get("cond_dim", 256),
@@ -204,14 +237,36 @@ class FlowModel(L.LightningModule):
                     beta_scale=vlm_config.get("beta_scale", 0.1),
                     use_layernorm=vlm_config.get("cond_layernorm", True),
                 )
-                for ch in decoder_channels
+                for ch in selected_channels
             ])
-            print(f"[VLM-FiLM] Created {len(self.vlm_film_heads)} FiLM heads for channels: {decoder_channels}")
+            print(f"[VLM-FiLM] Created {len(self.vlm_film_heads)} FiLM heads for channels: {selected_channels}")
+            for i, (stage_idx, ch) in enumerate(zip(self._vlm_film_stage_indices, selected_channels)):
+                print(f"[VLM-FiLM]   Head {i} -> Stage {stage_idx}: {ch} channels")
+            disabled_stages = [i for i in range(len(decoder_channels)) if i not in self._vlm_film_stage_indices]
+            if disabled_stages:
+                print(f"[VLM-FiLM] Disabled stages: {disabled_stages}")
             print(f"[VLM-FiLM] Cache directory: {vlm_config.get('cache_dir', 'cache/vlm_profiles')}")
             print("[VLM-FiLM] ✓ Initialization complete")
         else:
             self.vlm_film_conditioner = None
             self.vlm_film_heads = None
+            self._vlm_film_stage_indices = None
+
+        # Junction-aware FiLM gating configuration
+        self.junction_gating_config = junction_gating_config
+        if self.junction_gating_config is not None and self.junction_gating_config.get('enabled', False):
+            print("[Junction Gating] ✓ Enabled")
+            warmup_epochs = self.junction_gating_config.get('warmup_epochs', None)
+            if warmup_epochs is not None:
+                print(f"[Junction Gating]   warmup_epochs: {warmup_epochs} (gates=1.0 during warm-up)")
+            print(f"[Junction Gating]   source: {self.junction_gating_config.get('source', 'pred')}")
+            print(f"[Junction Gating]   threshold: {self.junction_gating_config.get('threshold', 0.5)}")
+            print(f"[Junction Gating]   degree_threshold: {self.junction_gating_config.get('degree_threshold', 3)}")
+            print(f"[Junction Gating]   radius_px: {self.junction_gating_config.get('radius_px', 8)}")
+            print(f"[Junction Gating]   gate_value_in_junction: {self.junction_gating_config.get('gate_value_in_junction', 0.0)}")
+            print(f"[Junction Gating]   apply_stages: {self.junction_gating_config.get('apply_stages', 'same_as_film')}")
+        else:
+            print("[Junction Gating] ✗ Disabled (default)")
 
         self.flow_matcher = SchrodingerBridgeConditionalFlowMatcher(sigma=sigma)
         
@@ -243,6 +298,7 @@ class FlowModel(L.LightningModule):
         
         # Loss configuration (registry 우선)
         from src.registry import LOSS_REGISTRY
+
         self.use_registry_loss = loss is not None
         if self.use_registry_loss:
             loss_name = loss.get('name')
@@ -325,34 +381,12 @@ class FlowModel(L.LightningModule):
             global_step=self.global_step,
             is_train=self.training,
         )
-        if (
-            vlm_cond is not None
-            and "diag" in vlm_cond
-            and self.vlm_film_heads is not None
-        ):
-            diag = vlm_cond.get("diag", {})
-            cond_vec = vlm_cond.get("cond_vec")
-            if cond_vec is not None:
-                with torch.no_grad():
-                    gamma_dev = 0.0
-                    beta_norm = 0.0
-                    count = 0
-                    for head in self.vlm_film_heads:
-                        gamma, beta = head(cond_vec)
-                        gamma_dev += (gamma - 1.0).abs().mean().item()
-                        beta_norm += beta.abs().mean().item()
-                        count += 1
-                    if count > 0:
-                        gamma_dev /= count
-                        beta_norm /= count
-                print(
-                    "[VLM-FiLM] "
-                    f"e_text_norm={diag.get('e_text_norm', 0):.4f} "
-                    f"cond_norm={diag.get('cond_norm', 0):.4f} "
-                    f"gamma_dev={gamma_dev:.4f} "
-                    f"beta_norm={beta_norm:.4f} "
-                    f"cond_cos_mean={diag.get('cond_cos_mean', 0):.4f}"
-                )
+        # Add stage indices to vlm_cond for decoder routing
+        if vlm_cond is not None and self._vlm_film_stage_indices is not None:
+            vlm_cond['_vlm_film_stage_indices'] = self._vlm_film_stage_indices
+            if not hasattr(self, '_logged_stage_indices'):
+                print(f"[_get_vlm_film_cond] Setting _vlm_film_stage_indices={self._vlm_film_stage_indices} in vlm_cond")
+                self._logged_stage_indices = True
         return vlm_cond
 
     def _unet_forward(
@@ -362,11 +396,17 @@ class FlowModel(L.LightningModule):
         images: torch.Tensor,
         batch: dict | None = None,
         vlm_cond: dict | None = None,
+        gt_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not self.use_vlm_film or self.vlm_film_conditioner is None or self.vlm_film_heads is None:
             return self.unet(x, t, images)
         if vlm_cond is None:
             vlm_cond = self._get_vlm_film_cond(images, batch)
+        
+        # Add junction gating config to vlm_cond if enabled
+        if vlm_cond is not None and hasattr(self, 'junction_gating_config') and self.junction_gating_config is not None:
+            vlm_cond['junction_gating_config'] = self.junction_gating_config
+        
         return self.unet(
             x,
             t,
@@ -492,74 +532,28 @@ class FlowModel(L.LightningModule):
         for i, name in enumerate(sample_names):
             sample_dir = out_path / self._parse_sample_name(name)
             sample_dir.mkdir(parents=True, exist_ok=True)
-            row_imgs_pred = []
-            row_imgs_sample = []
+            row_imgs = []
             per_tile_labels = []
             for idx, step_idx in enumerate(ordered_steps):
-                step_data = steps_dict.get(step_idx)
-                
-                # Handle both old format (tensor) and new format (dict with 'pred' and 'sample')
-                if isinstance(step_data, dict):
-                    # New format: save both pred and sample
-                    pred_tensor = step_data.get('pred')
-                    sample_tensor = step_data.get('sample')
-                    
-                    # Process and save prediction
-                    if torch.is_tensor(pred_tensor):
-                        img_pred = pred_tensor[i].detach().float().cpu()
-                        if img_pred.dim() == 3:
-                            img_pred = img_pred.squeeze(0)
-                        if img_pred.min().item() < 0.0:
-                            img_pred = (img_pred + 1.0) / 2.0
-                        img_pred = img_pred.clamp(0.0, 1.0)
-                        img_pred_np = (img_pred.numpy() * 255.0).astype(np.uint8)
-                        img_pred_np = img_pred_np.T
-                        row_imgs_pred.append(img_pred_np)
-                        try:
-                            step_img = Image.fromarray(img_pred_np, mode="L")
-                            step_img.save(sample_dir / f"step_{step_idx}_pred.png")
-                            print(f"[intermediate] Saved pred: {sample_dir / f'step_{step_idx}_pred.png'}")
-                        except Exception as e:
-                            print(f"[intermediate][warn] Failed to save pred: {e}")
-                    
-                    # Process and save sample
-                    if torch.is_tensor(sample_tensor):
-                        img_sample = sample_tensor[i].detach().float().cpu()
-                        if img_sample.dim() == 3:
-                            img_sample = img_sample.squeeze(0)
-                        if img_sample.min().item() < 0.0:
-                            img_sample = (img_sample + 1.0) / 2.0
-                        img_sample = img_sample.clamp(0.0, 1.0)
-                        img_sample_np = (img_sample.numpy() * 255.0).astype(np.uint8)
-                        img_sample_np = img_sample_np.T
-                        row_imgs_sample.append(img_sample_np)
-                        try:
-                            step_img = Image.fromarray(img_sample_np, mode="L")
-                            step_img.save(sample_dir / f"step_{step_idx}_sample.png")
-                            print(f"[intermediate] Saved sample: {sample_dir / f'step_{step_idx}_sample.png'}")
-                        except Exception as e:
-                            print(f"[intermediate][warn] Failed to save sample: {e}")
-                
-                elif torch.is_tensor(step_data):
-                    # Old format: single tensor (backward compatibility)
-                    img = step_data[i].detach().float().cpu()
-                    if img.dim() == 3:
-                        img = img.squeeze(0)
-                    if img.min().item() < 0.0:
-                        img = (img + 1.0) / 2.0
-                    img = img.clamp(0.0, 1.0)
-                    img = (img.numpy() * 255.0).astype(np.uint8)
-                    img = img.T
-                    row_imgs_pred.append(img)
-                    try:
-                        print(f"[intermediate] Saving step image: {sample_dir / f'step_{step_idx}.png'}, shape={img.shape}")
-                        step_img = Image.fromarray(img, mode="L")
-                        step_img.save(sample_dir / f"step_{step_idx}.png")
-                    except Exception as e:
-                        print(f"[intermediate][warn] Failed to save step image: {sample_dir / f'step_{step_idx}.png'}: {e}")
-                else:
+                step_tensor = steps_dict.get(step_idx)
+                if not torch.is_tensor(step_tensor):
                     continue
-                    
+                img = step_tensor[i].detach().float().cpu()
+                if img.dim() == 3:
+                    img = img.squeeze(0)
+                if img.min().item() < 0.0:
+                    img = (img + 1.0) / 2.0
+                img = img.clamp(0.0, 1.0)
+                img = (img.numpy() * 255.0).astype(np.uint8)
+                img = img.T
+                row_imgs.append(img)
+                # Save each step image (디버깅용 로그 추가)
+                try:
+                    print(f"[intermediate] Saving step image: {sample_dir / f'step_{step_idx}.png'}, shape={img.shape}")
+                    step_img = Image.fromarray(img, mode="L")
+                    step_img.save(sample_dir / f"step_{step_idx}.png")
+                except Exception as e:
+                    print(f"[intermediate][warn] Failed to save step image: {sample_dir / f'step_{step_idx}.png'}: {e}")
                 if labels is not None and idx < len(labels):
                     per_tile_labels.append(labels[idx])
                 else:
@@ -573,16 +567,9 @@ class FlowModel(L.LightningModule):
                 img = img.clamp(0.0, 1.0)
                 img = (img.numpy() * 255.0).astype(np.uint8)
                 img = img.T
-                if row_imgs_pred:
-                    row_imgs_pred.append(img)
-                if row_imgs_sample:
-                    row_imgs_sample.append(img)
+                row_imgs.append(img)
                 per_tile_labels.append("t=1.00")
-            
-            # Create concatenated row images
-            def create_row_image(row_imgs, filename):
-                if not row_imgs:
-                    return
+            if row_imgs:
                 row = np.concatenate(row_imgs, axis=1)
                 tile_h, tile_w = row_imgs[0].shape
                 font_size = max(12, int(tile_h * 0.08))
@@ -612,29 +599,43 @@ class FlowModel(L.LightningModule):
                     x = x0 + (tile_w - text_w) // 2
                     y = 2
                     draw.text((x, y), label, fill=0, font=font)
-                canvas.save(sample_dir / filename)
-            
-            # Save both pred and sample rows
-            create_row_image(row_imgs_pred, "steps_row_pred.png")
-            create_row_image(row_imgs_sample, "steps_row_sample.png")
+                canvas.save(sample_dir / "steps_row.png")
 
     def _maybe_save_intermediate_eval(self, images: torch.Tensor, sample_names: list) -> None:
+        print(f"[intermediate] _maybe_save_intermediate_eval called")
         if not getattr(self, 'eval_save_intermediate', False):
+            print(f"[intermediate] eval_save_intermediate is False, skipping")
             return
         if hasattr(self, 'trainer') and hasattr(self.trainer, 'is_global_zero') and not self.trainer.is_global_zero:
+            print(f"[intermediate] Not global_zero, skipping")
             return
         out_dir = getattr(self, 'eval_intermediate_dir', None)
         if not out_dir:
+            print(f"[intermediate] eval_intermediate_dir is None, skipping")
             return
         indices = self._select_intermediate_indices(sample_names)
         if not indices:
+            print(f"[intermediate] No indices selected, skipping")
             return
         timesteps = int(getattr(self.hparams, 'timesteps', 0))
         if timesteps <= 0:
+            print(f"[intermediate] timesteps <= 0, skipping")
             return
         save_steps = self._resolve_intermediate_steps(timesteps)
         if not save_steps:
+            print(f"[intermediate] save_steps is empty, skipping")
             return
+        label_list = None
+        if self.eval_intermediate_t:
+            label_list = []
+            idx_map = {}
+            for t in self.eval_intermediate_t:
+                t_val = max(0.0, min(1.0, float(t)))
+                idx = int(round(t_val * (timesteps - 1)))
+                if idx not in idx_map:
+                    idx_map[idx] = f"t={t_val:.2f}"
+            for step_idx in sorted(save_steps):
+                label_list.append(idx_map.get(step_idx, f"step={int(step_idx)}"))
         subset_images = images[indices]
         subset_names = [sample_names[i] for i in indices]
         
@@ -804,7 +805,14 @@ class FlowModel(L.LightningModule):
 
         t, xt, x0 = make_xt_binary(x1)
         vlm_film_cond = self._get_vlm_film_cond(images, batch)
-        unet_out = self._unet_forward(xt, t, images, batch=batch, vlm_cond=vlm_film_cond)
+        
+        # Pass gt_mask for junction gating if source='gt'
+        gt_mask_for_gating = None
+        if self.junction_gating_config is not None and self.junction_gating_config.get('enabled', False):
+            if self.junction_gating_config.get('source') == 'gt':
+                gt_mask_for_gating = x1
+        
+        unet_out = self._unet_forward(xt, t, images, batch=batch, vlm_cond=vlm_film_cond, gt_mask=gt_mask_for_gating)
         logits = unet_out[:, 1:2, :, :] if self.use_geometry_head else unet_out
 
         loss, loss_dict = loss_dfm_binary(logits, x1)
@@ -1105,8 +1113,15 @@ class FlowModel(L.LightningModule):
         return traj[-1]
 
     def _dfm_logits(self, xt: torch.Tensor, t: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
-        """Forward helper for DFM logits (single-head or geometry head)."""
-        unet_out = self._unet_forward(xt, t, images, batch=None)
+        """Forward helper for DFM logits (single-head or geometry head).
+        
+        Note: For VLM-FiLM, we extract VLM features from the current images.
+        In sliding window inference, each patch extracts VLM features independently,
+        matching the training behavior.
+        """
+        # Extract VLM conditioning if enabled (same as training)
+        vlm_cond = self._get_vlm_film_cond(images, batch=None) if self.use_vlm_film else None
+        unet_out = self._unet_forward(xt, t, images, batch=None, vlm_cond=vlm_cond)
         if self.use_geometry_head:
             return unet_out[:, 1:2, :, :]
         return unet_out
@@ -1456,6 +1471,59 @@ class FlowModel(L.LightningModule):
         if self.use_geometry_head:
             return unet_out[:, 0:1, :, :]
         return unet_out
+
+    def on_save_checkpoint(self, checkpoint):
+        """Save metadata about which stages FiLM was applied to during training."""
+        super().on_save_checkpoint(checkpoint)
+        if self.use_vlm_film and self._vlm_film_stage_indices is not None:
+            checkpoint['vlm_film_trained_stages'] = self._vlm_film_stage_indices
+
+    def on_load_checkpoint(self, checkpoint):
+        """Hook called after loading checkpoint to sync _vlm_film_stage_indices with actual trained stages."""
+        super().on_load_checkpoint(checkpoint)
+        
+        # Priority 1: Use trained stages from checkpoint metadata (most reliable)
+        trained_stages = checkpoint.get('vlm_film_trained_stages')
+        if trained_stages is not None:
+            self._vlm_film_stage_indices = sorted(trained_stages)
+            print(f"[on_load_checkpoint] Using trained stages from checkpoint: {self._vlm_film_stage_indices}")
+            return
+        
+        # Priority 2: Use hparams if available
+        if self.use_vlm_film and hasattr(self.hparams, 'vlm_film_decoder_stages'):
+            decoder_stages = self.hparams.vlm_film_decoder_stages
+            if decoder_stages is not None:
+                self._vlm_film_stage_indices = sorted(decoder_stages)
+                print(f"[on_load_checkpoint] Using stages from hparams: {self._vlm_film_stage_indices}")
+                return
+        
+        # Priority 3: Legacy checkpoint - infer stages from FiLM head output dimensions
+        # Decoder stage channels: Stage0=128, Stage1=96, Stage2=64, Stage3=32
+        # FiLM outputs gamma+beta: Stage0=256, Stage1=192, Stage2=128, Stage3=64
+        if self.use_vlm_film and hasattr(self, 'vlm_film_heads') and self.vlm_film_heads is not None:
+            dim_to_stage = {256: 0, 192: 1, 128: 2, 64: 3}
+            inferred_stages = []
+            for head_idx, head in enumerate(self.vlm_film_heads):
+                # Get output dimension from final layer
+                if hasattr(head, 'mlp') and len(head.mlp) > 2:
+                    out_dim = head.mlp[2].out_features
+                    stage = dim_to_stage.get(out_dim)
+                    if stage is not None:
+                        inferred_stages.append(stage)
+            
+            if inferred_stages:
+                self._vlm_film_stage_indices = sorted(inferred_stages)
+                print(f"[on_load_checkpoint] Inferred stages from head output dims: {self._vlm_film_stage_indices}")
+                return
+            else:
+                # Fallback to old behavior if dimension mapping fails
+                num_heads = len(self.vlm_film_heads)
+                inferred_stages = list(range(num_heads))
+                self._vlm_film_stage_indices = inferred_stages
+                print(f"[on_load_checkpoint] Fallback: Inferred stages from {num_heads} heads: {inferred_stages}")
+                return
+        
+        print(f"[on_load_checkpoint] WARNING: Could not determine FiLM stages!")
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(

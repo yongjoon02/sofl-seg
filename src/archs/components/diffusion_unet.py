@@ -12,7 +12,10 @@ from functools import partial
 import torch
 from einops import rearrange
 from torch import einsum, nn
+from torch.utils.checkpoint import checkpoint
 from torch.fft import fft2, ifft2
+
+from src.archs.components.vlm_film import apply_vlm_film
 
 # Constants
 ModelPrediction = namedtuple('ModelPrediction', ['predict_noise', 'predict_x_start'])
@@ -465,7 +468,7 @@ class SegDiffUNet(nn.Module):
         self.final_res_block = block_klass(dim * 2, dim, time_emb_dim=time_dim)
         self.final_conv = nn.Conv2d(dim, mask_channels, 1)
 
-    def forward(self, x, time, cond):
+    def forward(self, x, time, cond, vlm_cond: dict | None = None, vlm_film_heads=None):
         # F(x_t) + G(I) -> UNet
         F_out = self.F_model(x)
         G_out = self.G_model(cond)
@@ -566,7 +569,7 @@ class SimpleConcatUNet(nn.Module):
         self.final_res_block = block_klass(dim * 2, dim, time_emb_dim=time_dim)
         self.final_conv = nn.Conv2d(dim, mask_channels, 1)
 
-    def forward(self, x, time, cond):
+    def forward(self, x, time, cond, vlm_cond: dict | None = None, vlm_film_heads=None):
         """
         Args:
             x: noisy mask (B, mask_channels, H, W)
@@ -618,13 +621,15 @@ class MedSegDiffUNet(nn.Module):
     def __init__(self, dim, image_size, mask_channels=1, input_img_channels=1, init_dim=None,
                  dim_mult=(1, 2, 4, 8), full_self_attn=(False, False, True, True), attn_dim_head=32,
                  attn_heads=4, mid_transformer_depth=1, resnet_block_groups=8,
-                 skip_connect_condition_fmap=False, conditioning_fmap_size=None):
+                 skip_connect_condition_fmap=False, conditioning_fmap_size=None,
+                 use_gradient_checkpointing: bool = False):
         super().__init__()
 
         self.image_size = image_size
         self.mask_channels = mask_channels
         self.input_img_channels = input_img_channels
         self.skip_connect_condition_fmap = skip_connect_condition_fmap
+        self.use_gradient_checkpointing = bool(use_gradient_checkpointing)
 
         init_dim = default(init_dim, dim)
 
@@ -689,7 +694,14 @@ class MedSegDiffUNet(nn.Module):
         self.final_res_block = block_klass(dim * 2, dim, time_emb_dim=time_dim)
         self.final_conv = nn.Conv2d(dim, mask_channels, 1)
 
-    def forward(self, x, time, cond):
+    def _checkpoint(self, fn, *args):
+        if not self.use_gradient_checkpointing or not torch.is_grad_enabled():
+            return fn(*args)
+        if not any(torch.is_tensor(arg) and arg.requires_grad for arg in args):
+            return fn(*args)
+        return checkpoint(fn, *args, use_reentrant=False)
+
+    def forward(self, x, time, cond, vlm_cond: dict | None = None, vlm_film_heads=None):
         skip_connect_c = self.skip_connect_condition_fmap
 
         x = self.init_conv(x)
@@ -700,36 +712,63 @@ class MedSegDiffUNet(nn.Module):
         h = []
         for (block1, block2, attn, dsample), (cond_block1, cond_block2, cond_attn, cond_dsample), conditioner in \
                 zip(self.downs, self.cond_downs, self.conditioners):
-            x = block1(x, t)
-            c = cond_block1(c, t)
+            x = self._checkpoint(block1, x, t)
+            c = self._checkpoint(cond_block1, c, t)
             h.append([x, c] if skip_connect_c else [x])
 
-            x = block2(x, t)
-            c = cond_block2(c, t)
-            x = attn(x)
-            c = cond_attn(c)
-            x = conditioner(x, c)  # FFT conditioning with conditional features
+            x = self._checkpoint(block2, x, t)
+            c = self._checkpoint(cond_block2, c, t)
+            x = self._checkpoint(attn, x)
+            c = self._checkpoint(cond_attn, c)
+            x = self._checkpoint(conditioner, x, c)  # FFT conditioning with conditional features
             h.append([x, c] if skip_connect_c else [x])
 
-            x = dsample(x)
-            c = cond_dsample(c)
+            x = self._checkpoint(dsample, x)
+            c = self._checkpoint(cond_dsample, c)
 
-        x = self.mid_block1(x, t)
-        c = self.cond_mid_block1(c, t)
+        x = self._checkpoint(self.mid_block1, x, t)
+        c = self._checkpoint(self.cond_mid_block1, c, t)
         x = x + c
-        x = self.mid_transformer(x, c)
-        x = self.mid_block2(x, t)
+        x = self._checkpoint(self.mid_transformer, x, c)
+        x = self._checkpoint(self.mid_block2, x, t)
 
-        for block1, block2, attn, upsample_layer in self.ups:
+        for stage_idx, (block1, block2, attn, upsample_layer) in enumerate(self.ups):
             x = torch.cat((x, *h.pop()), dim=1)
-            x = block1(x, t)
+            x = self._checkpoint(block1, x, t)
             x = torch.cat((x, *h.pop()), dim=1)
-            x = block2(x, t)
-            x = attn(x)
-            x = upsample_layer(x)
+            x = self._checkpoint(block2, x, t)
+            if vlm_cond is not None and vlm_film_heads is not None:
+                # Map decoder stage_idx to FiLM head index using _vlm_film_stage_indices
+                stage_indices = vlm_cond.get('_vlm_film_stage_indices')
+                # DEBUG
+                if stage_idx == 0 and not hasattr(self, '_vlm_debug_logged'):
+                    print(f"[UNET-DEBUG] stage_indices from vlm_cond: {stage_indices}")
+                    print(f"[UNET-DEBUG] vlm_film_heads length: {len(vlm_film_heads)}")
+                    self._vlm_debug_logged = True
+                
+                if stage_indices is not None and stage_idx in stage_indices:
+                    film_head_idx = stage_indices.index(stage_idx)
+                    x, _payload = apply_vlm_film(
+                        x,
+                        vlm_cond=vlm_cond,
+                        vlm_film_heads=vlm_film_heads,
+                        stage_idx=film_head_idx,
+                        module=self,
+                    )
+                elif stage_indices is None:
+                    # Legacy: direct mapping
+                    x, _payload = apply_vlm_film(
+                        x,
+                        vlm_cond=vlm_cond,
+                        vlm_film_heads=vlm_film_heads,
+                        stage_idx=stage_idx,
+                        module=self,
+                    )
+            x = self._checkpoint(attn, x)
+            x = self._checkpoint(upsample_layer, x)
 
         x = torch.cat((x, r), dim=1)
-        x = self.final_res_block(x, t)
+        x = self._checkpoint(self.final_res_block, x, t)
         return self.final_conv(x)
 
 

@@ -29,7 +29,7 @@ torch.set_float32_matmul_precision('medium')
 import argparse
 import autorootcwd
 
-from src.runner import TrainRunner
+from src.runner.train_runner_vlm_film import TrainRunnerVLMFiLM
 from src.registry import list_models, list_datasets
 from src.utils.config import load_config, merge_config_with_args, get_default_config_path
 
@@ -143,13 +143,7 @@ def main():
     print("="*60 + "\n")
     
     # Create runner and train
-    # Auto-select VLM-FiLM runner if use_vlm_film is enabled
-    if config.get('model', {}).get('use_vlm_film', False):
-        from src.runner.train_runner_vlm_film import TrainRunnerVLMFiLM
-        print("[INFO] Using TrainRunnerVLMFiLM (VLM-FiLM enabled)")
-        runner = TrainRunnerVLMFiLM(config)
-    else:
-        runner = TrainRunner(config)
+    runner = TrainRunnerVLMFiLM(config)
     runner.run()
 
 
