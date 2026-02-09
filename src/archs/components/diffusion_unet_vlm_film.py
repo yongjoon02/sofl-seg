@@ -18,7 +18,16 @@ class MedSegDiffUNetVLMFiLM(MedSegDiffUNet):
     - Legacy "post-block2, pre-attention" path disabled
     """
 
-    def forward(self, x, time, cond, vlm_cond: dict | None = None, vlm_film_heads=None):
+    def forward(
+        self,
+        x,
+        time,
+        cond,
+        vlm_cond: dict | None = None,
+        vlm_film_heads=None,
+        junction_gate: torch.Tensor | None = None,
+        junction_warmup_active: bool = False,
+    ):
         skip_connect_c = self.skip_connect_condition_fmap
 
         x = self.init_conv(x)
@@ -79,6 +88,8 @@ class MedSegDiffUNetVLMFiLM(MedSegDiffUNet):
                         stage_idx=film_head_idx,
                         module=self,
                         apply_point="post_block1_pre_concat2",
+                        junction_gate=junction_gate,
+                        junction_warmup_active=junction_warmup_active,
                     )
             
             # Second skip-connection concatenation
@@ -94,4 +105,3 @@ class MedSegDiffUNetVLMFiLM(MedSegDiffUNet):
         x = torch.cat((x, r), dim=1)
         x = self._checkpoint(self.final_res_block, x, t)
         return self.final_conv(x)
-

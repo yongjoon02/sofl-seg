@@ -64,12 +64,29 @@ class MedSegDiffFlowVLMFiLM(nn.Module):
             use_gradient_checkpointing=use_gradient_checkpointing,
         )
 
-    def forward(self, x, time, cond, vlm_cond: dict | None = None, vlm_film_heads=None):
+    def forward(
+        self,
+        x,
+        time,
+        cond,
+        vlm_cond: dict | None = None,
+        vlm_film_heads=None,
+        junction_gate: torch.Tensor | None = None,
+        junction_warmup_active: bool = False,
+    ):
         if isinstance(time, torch.Tensor):
             time_in = time * self.time_scale
         else:
             time_in = time * self.time_scale
-        return self.base_unet(x, time_in, cond, vlm_cond=vlm_cond, vlm_film_heads=vlm_film_heads)
+        return self.base_unet(
+            x,
+            time_in,
+            cond,
+            vlm_cond=vlm_cond,
+            vlm_film_heads=vlm_film_heads,
+            junction_gate=junction_gate,
+            junction_warmup_active=junction_warmup_active,
+        )
 
 
 class TaskSpecificRefinementBlock(nn.Module):
@@ -155,7 +172,17 @@ class MedSegDiffFlowMultiTaskVLMFiLM(nn.Module):
     def _capture_features(self, _module, _inputs, output):
         self._feat = output
 
-    def forward(self, x, time, cond, vlm_cond: dict | None = None, vlm_film_heads=None, return_features: bool = False):
+    def forward(
+        self,
+        x,
+        time,
+        cond,
+        vlm_cond: dict | None = None,
+        vlm_film_heads=None,
+        return_features: bool = False,
+        junction_gate: torch.Tensor | None = None,
+        junction_warmup_active: bool = False,
+    ):
         if isinstance(time, torch.Tensor):
             time_in = time * self.time_scale
         else:
@@ -163,7 +190,15 @@ class MedSegDiffFlowMultiTaskVLMFiLM(nn.Module):
 
         # Note: Multitask model uses base_unet which handles FiLM internally
         # FiLM is applied at post-concat in Stage 4/3 only via MedSegDiffUNetVLMFiLM
-        _ = self.base_unet(x, time_in, cond, vlm_cond=vlm_cond, vlm_film_heads=vlm_film_heads)
+        _ = self.base_unet(
+            x,
+            time_in,
+            cond,
+            vlm_cond=vlm_cond,
+            vlm_film_heads=vlm_film_heads,
+            junction_gate=junction_gate,
+            junction_warmup_active=junction_warmup_active,
+        )
         feat = self._feat
         hard_feat = self.hard_refine(feat)
         soft_feat = self.soft_refine(feat)
@@ -173,4 +208,3 @@ class MedSegDiffFlowMultiTaskVLMFiLM(nn.Module):
         if return_features:
             return v_pred, feat
         return v_pred
-

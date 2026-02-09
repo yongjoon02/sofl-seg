@@ -7,11 +7,14 @@ model:
   debug_dfm: false
 
   use_vlm_film: true
-  vlm_film_decoder_stages: [2, 3]  # 후반 2개 스테이지 (64ch, 32ch)에만 적용
+  vlm_film_decoder_stages: [0, 1, 2, 3]  # 후반 2개 스테이지 (64ch, 32ch)에만 적용
   vlm_film_config:
     model_name: "Qwen/Qwen2.5-VL-3B-Instruct"
     cond_dim: 256
     cache_dir: "cache/vlm_profiles"
+    batch_strategy: "per_sample"  # CRITICAL: per-sample conditioning (not "first")
+    update_interval_steps_train: 25  # ~1 epoch (155 samples / 6 batch = 26 steps)
+    update_interval_steps_eval: 1    # Always fresh in validation
     # FiLM parameters (deprecated - using unconstrained γ=1+Linear(c), β=Linear(c))
     gamma_scale: 0.1  # Not used: identity-init allows unbounded learning
     beta_scale: 0.1   # Not used: identity-init allows unbounded learning
@@ -24,10 +27,10 @@ model:
   # Controls spatial application of VLM-FiLM modulation to reduce false positives at vessel junctions
   junction_gating_config:
     enabled: true                    
-    warmup_epochs: 20               
+    warmup_epochs: 5  # Reduced: junction artifacts appear early in training
     source: "pred"               
     threshold: 0.5               
-    degree_threshold: 3          
+    degree_threshold: 2  # More conservative: detect T-junctions too          
     radius_px: 8               
     gate_value_in_junction: 0.0    
     apply_stages: "same_as_film"    
@@ -60,7 +63,7 @@ model:
   channel_mult: [1, 2, 3, 4]
   channel_mult_emb: 4
   num_blocks: 3
-  # Match attention to actual feature map resolutions: 320 -> 160 -> 80 -> 40
+  # Match attention to VLM-FiLM stages only (s2=40x40, s3=20x20) to avoid overfitting on small dataset
   attn_resolutions: [80, 40]
   dropout: 0.0
   label_dim: 0

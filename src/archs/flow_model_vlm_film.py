@@ -373,6 +373,18 @@ class FlowModelVLMFiLM(L.LightningModule):
     def _get_vlm_film_cond(self, images: torch.Tensor, batch: dict | None = None) -> dict | None:
         if not self.use_vlm_film or self.vlm_film_conditioner is None:
             return None
+        # If patches expanded the batch (B -> B*num_patches), expand names to match
+        if isinstance(batch, dict) and "name" in batch:
+            names = batch.get("name")
+            if isinstance(names, (list, tuple)):
+                bsz = int(images.shape[0])
+                if len(names) != bsz and bsz % len(names) == 0:
+                    repeat = bsz // len(names)
+                    expanded = []
+                    for n in names:
+                        expanded.extend([n] * repeat)
+                    batch = dict(batch)
+                    batch["name"] = expanded
         vlm_cond = self.vlm_film_conditioner.compute_condition(
             image=images,
             prompt=None,
@@ -388,6 +400,13 @@ class FlowModelVLMFiLM(L.LightningModule):
                 print(f"[_get_vlm_film_cond] Setting _vlm_film_stage_indices={self._vlm_film_stage_indices} in vlm_cond")
                 self._logged_stage_indices = True
         return vlm_cond
+
+    def _compute_junction_gate(self, mask: torch.Tensor) -> torch.Tensor | None:
+        if mask is None:
+            return None
+        from src.utils.junction_gating import compute_junction_gate
+        gates = compute_junction_gate(mask, self.junction_gating_config, target_sizes=None)
+        return gates.get(0)
 
     def _unet_forward(
         self,
@@ -406,13 +425,54 @@ class FlowModelVLMFiLM(L.LightningModule):
         # Add junction gating config to vlm_cond if enabled
         if vlm_cond is not None and hasattr(self, 'junction_gating_config') and self.junction_gating_config is not None:
             vlm_cond['junction_gating_config'] = self.junction_gating_config
-        
+
+        junction_gate = None
+        warmup_active = False
+        if self.junction_gating_config is not None and self.junction_gating_config.get('enabled', False):
+            warmup_epochs = self.junction_gating_config.get('warmup_epochs', None)
+            if warmup_epochs is not None:
+                warmup_active = self.current_epoch < int(warmup_epochs)
+
+            source = self.junction_gating_config.get('source', 'pred')
+            if source == 'gt' and gt_mask is not None:
+                if warmup_active:
+                    junction_gate = torch.ones_like(gt_mask[:, :1])
+                else:
+                    junction_gate = self._compute_junction_gate(gt_mask)
+            elif source == 'pred':
+                if warmup_active:
+                    junction_gate = torch.ones_like(x[:, :1])
+                else:
+                    # Two-pass: get prediction first, then compute gate, then re-run with gate
+                    logits = self.unet(
+                        x,
+                        t,
+                        images,
+                        vlm_cond=vlm_cond,
+                        vlm_film_heads=self.vlm_film_heads,
+                        junction_gate=None,
+                        junction_warmup_active=warmup_active,
+                    )
+                    pred_mask = torch.sigmoid(logits)
+                    junction_gate = self._compute_junction_gate(pred_mask)
+                    return self.unet(
+                        x,
+                        t,
+                        images,
+                        vlm_cond=vlm_cond,
+                        vlm_film_heads=self.vlm_film_heads,
+                        junction_gate=junction_gate,
+                        junction_warmup_active=warmup_active,
+                    )
+
         return self.unet(
             x,
             t,
             images,
             vlm_cond=vlm_cond,
             vlm_film_heads=self.vlm_film_heads,
+            junction_gate=junction_gate,
+            junction_warmup_active=warmup_active,
         )
 
     def _infer_sliding(self, images: torch.Tensor) -> torch.Tensor:
@@ -451,14 +511,14 @@ class FlowModelVLMFiLM(L.LightningModule):
         noise = self._sample_x0_like(images, channels=self._infer_noise_channels())
         return self.sample(noise, images)
 
-    def _infer_sliding_dfm(self, images: torch.Tensor) -> torch.Tensor:
+    def _infer_sliding_dfm(self, images: torch.Tensor, vlm_cond: dict | None = None) -> torch.Tensor:
         """Sliding-window inference for DFM (no initial noise)."""
-        return self._sliding_window_predict(images)
+        return self._sliding_window_predict(images, vlm_cond=vlm_cond)
 
-    def _sliding_window_predict(self, images: torch.Tensor) -> torch.Tensor:
+    def _sliding_window_predict(self, images: torch.Tensor, vlm_cond: dict | None = None) -> torch.Tensor:
         """Sliding-window predict that clamps patch outputs to [0, 1]."""
         def _sample_fn(x: torch.Tensor) -> torch.Tensor:
-            output = self.sample(None, x)
+            output = self.sample(None, x, vlm_cond=vlm_cond)
             return torch.clamp(output, 0.0, 1.0)
 
         return self.inferer(images, _sample_fn)
@@ -1076,7 +1136,7 @@ class FlowModelVLMFiLM(L.LightningModule):
         return torch.randn(shape, device=ref.device, dtype=ref.dtype)
 
 
-    def sample(self, noise, images):
+    def sample(self, noise, images, vlm_cond: dict | None = None):
         """Sample from flow matching model (inference).
         
         Args:
@@ -1091,8 +1151,10 @@ class FlowModelVLMFiLM(L.LightningModule):
             if getattr(self.hparams, 'dfm_sampler', self.dfm_sampler) == 'heun':
                 sampler = sampler_dfm_heun
             eps = float(getattr(self.hparams, 'dfm_eps', 1e-6))
+            if vlm_cond is None and self.use_vlm_film:
+                vlm_cond = self._get_vlm_film_cond(images, batch=None)
             return sampler(
-                self._dfm_logits,
+                lambda xt, t, cond: self._dfm_logits(xt, t, cond, vlm_cond=vlm_cond),
                 images,
                 self.hparams.timesteps,
                 eps=eps,
@@ -1112,7 +1174,14 @@ class FlowModelVLMFiLM(L.LightningModule):
         
         return traj[-1]
 
-    def _dfm_logits(self, xt: torch.Tensor, t: torch.Tensor, images: torch.Tensor) -> torch.Tensor:
+    def _dfm_logits(
+        self,
+        xt: torch.Tensor,
+        t: torch.Tensor,
+        images: torch.Tensor,
+        vlm_cond: dict | None = None,
+        batch: dict | None = None,
+    ) -> torch.Tensor:
         """Forward helper for DFM logits (single-head or geometry head).
         
         Note: For VLM-FiLM, we extract VLM features from the current images.
@@ -1120,8 +1189,9 @@ class FlowModelVLMFiLM(L.LightningModule):
         matching the training behavior.
         """
         # Extract VLM conditioning if enabled (same as training)
-        vlm_cond = self._get_vlm_film_cond(images, batch=None) if self.use_vlm_film else None
-        unet_out = self._unet_forward(xt, t, images, batch=None, vlm_cond=vlm_cond)
+        if vlm_cond is None and self.use_vlm_film:
+            vlm_cond = self._get_vlm_film_cond(images, batch=batch)
+        unet_out = self._unet_forward(xt, t, images, batch=batch, vlm_cond=vlm_cond)
         if self.use_geometry_head:
             return unet_out[:, 1:2, :, :]
         return unet_out
@@ -1246,14 +1316,16 @@ class FlowModelVLMFiLM(L.LightningModule):
             output_geometry_list = []
             for _ in range(self.hparams.num_ensemble):
                 if getattr(self.hparams, 'use_sliding_infer', True):
-                    output_geometry = self._sliding_window_predict(images)
+                    vlm_cond = self._get_vlm_film_cond(images, batch) if self.use_vlm_film else None
+                    output_geometry = self._sliding_window_predict(images, vlm_cond=vlm_cond)
                 else:
                     output_geometry = self.sample(None, images)
                 output_geometry_list.append(output_geometry)
             output_geometry = torch.stack(output_geometry_list).mean(dim=0)
         else:
             if getattr(self.hparams, 'use_sliding_infer', True):
-                output_geometry = self._sliding_window_predict(images)
+                vlm_cond = self._get_vlm_film_cond(images, batch) if self.use_vlm_film else None
+                output_geometry = self._sliding_window_predict(images, vlm_cond=vlm_cond)
             else:
                 output_geometry = self.sample(None, images)
 
