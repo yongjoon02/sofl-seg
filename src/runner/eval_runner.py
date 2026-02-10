@@ -189,9 +189,25 @@ class EvalRunner:
         return self.tracker.get_experiment_config(exp_id)
 
     def _get_vlm_film_stages_from_checkpoint(self, checkpoint_path: Path) -> Optional[List[int]]:
-        """Detect VLM FiLM decoder stage indices from checkpoint state_dict (number of heads)."""
+        """Detect VLM FiLM decoder stage indices from checkpoint hyperparameters."""
         try:
             ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+            
+            # Priority 1: Read from hyperparameters (most reliable)
+            hparams = ckpt.get("hyper_parameters", {})
+            stages = hparams.get("vlm_film_decoder_stages")
+            if stages is not None:
+                print(f"   Using VLM FiLM stages from hparams: {stages}")
+                return stages
+            
+            # Priority 2: Check checkpoint metadata
+            trained_stages = ckpt.get("vlm_film_trained_stages")
+            if trained_stages is not None:
+                print(f"   Using VLM FiLM stages from checkpoint metadata: {trained_stages}")
+                return sorted(trained_stages)
+            
+            # Priority 3: Infer from state_dict (head count only, NOT indices)
+            # Note: head indices are always [0, 1, ...] regardless of decoder stages
             state_dict = ckpt.get("state_dict", {})
             head_indices = set()
             for key in state_dict:
@@ -204,14 +220,10 @@ class EvalRunner:
                     except (ValueError, IndexError):
                         continue
             if head_indices:
-                stages = sorted(head_indices)
-                print(f"   Detected VLM FiLM stages from checkpoint: {stages}")
-                return stages
-            hparams = ckpt.get("hyper_parameters", {})
-            stages = hparams.get("vlm_film_decoder_stages")
-            if stages is not None:
-                print(f"   Using VLM FiLM stages from hparams: {stages}")
-                return stages
+                num_heads = len(head_indices)
+                print(f"   WARNING: Could not find stage config, inferring {num_heads} heads as stages [0..{num_heads-1}]")
+                return list(range(num_heads))
+            
             return None
         except Exception as e:
             print(f"   Could not detect VLM FiLM stages: {e}")

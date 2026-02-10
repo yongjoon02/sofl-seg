@@ -1277,8 +1277,9 @@ class FlowModel(L.LightningModule):
         self.log('val/x1_pred_mean', out_mean, prog_bar=False, sync_dist=True)
         self.log('val/x1_pred_std', out_std, prog_bar=False, sync_dist=True)
 
-        # Threshold on probabilities (0.5 기준)
-        preds = (output_geometry_hard > 0.5).long()
+        # Threshold on probabilities (dataset-specific)
+        threshold = 0.4 if self.hparams.data_name == "rossa" else 0.5
+        preds = (output_geometry_hard > threshold).long()
 
         # Convert geometry for logging
         if geometry.dim() == 4 and geometry.shape[1] == 1:
@@ -1403,7 +1404,8 @@ class FlowModel(L.LightningModule):
         if output_geometry.dim() == 4 and output_geometry.shape[1] == 1:
             output_geometry = output_geometry.squeeze(1)
 
-        preds = (output_geometry > 0.5).long()
+        threshold = 0.4 if self.hparams.data_name == "rossa" else 0.5
+        preds = (output_geometry > threshold).long()
 
         general_metrics = self.val_metrics(preds, labels)
         vessel_metrics = self.vessel_metrics(preds, labels)

@@ -6,7 +6,7 @@ model:
   dfm_eps: 1e-6
   debug_dfm: false
 
-  use_vlm_film: true
+  use_vlm_film: false
   vlm_film_decoder_stages: [2, 3]  # 후반 2개 스테이지 (64ch, 32ch)에만 적용
   vlm_film_config:
     model_name: "Qwen/Qwen2.5-VL-3B-Instruct"
@@ -40,7 +40,7 @@ model:
   patch_plan:
     - [224, 1]
   dim: 32
-  timesteps: 50
+  timesteps: 100
   num_ensemble: 1
   sigma: 0.25
   use_sliding_infer: true
@@ -51,7 +51,7 @@ model:
   num_classes: 2
   experiment_name: flow_model_medsegdiff
   data_name: octa500_6m
-  log_image_enabled: true
+  log_image_enabled: false
   log_image_names:
     - '10181.bmp'
     - '10185.bmp'

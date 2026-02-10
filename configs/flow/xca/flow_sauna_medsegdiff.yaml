@@ -7,7 +7,7 @@ model:
   debug_dfm: false
 
   use_vlm_film: true
-  vlm_film_decoder_stages: [0, 1, 2, 3]  # 후반 2개 스테이지 (64ch, 32ch)에만 적용
+  vlm_film_decoder_stages: [0, 1]  # 후반 2개 스테이지 (64ch, 32ch)에만 적용
   vlm_film_config:
     model_name: "Qwen/Qwen2.5-VL-3B-Instruct"
     cond_dim: 256
