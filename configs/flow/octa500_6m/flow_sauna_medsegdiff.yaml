@@ -40,8 +40,8 @@ model:
   patch_plan:
     - [224, 1]
   dim: 32
-  timesteps: 100
-  num_ensemble: 1
+  timesteps: 50
+  num_ensemble: 5
   sigma: 0.25
   use_sliding_infer: true
   learning_rate: 0.0002

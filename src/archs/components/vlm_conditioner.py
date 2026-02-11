@@ -1,6 +1,7 @@
 """VLM-to-FiLM conditioning via text generation + text embedding (no JSON)."""
 
 import hashlib
+import re
 import os
 import uuid
 from pathlib import Path
@@ -62,6 +63,137 @@ def _to_torch_dtype(name: str) -> torch.dtype:
         if key in ("bfloat16", "bf16"):
             return torch.bfloat16
     return torch.float32
+
+
+# =============================================================================
+# Logits-feature conditioning (mirrors analysis script)
+# =============================================================================
+
+LEVELS = ["A", "B", "C", "D", "E", "F", "G", "H"]  # A=very_low ... H=max
+LABELS = ["low_contrast", "motion", "overlap", "catheter", "clutter", "noise", "blur", "other"]
+LABELS_FP = ["background", "catheter", "bone", "saturation", "texture", "artifact", "blur", "other"]
+UNK_LABEL = "unknown"
+
+
+def _get_tokenizer(vlm: "QwenVLMTextGenerator"):
+    return getattr(vlm._processor, "tokenizer", vlm._processor)
+
+
+def _build_chat_text(vlm: "QwenVLMTextGenerator", image: Image.Image, prompt: str, answer: Optional[str]) -> str:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
+    if answer is not None:
+        messages.append({"role": "assistant", "content": [{"type": "text", "text": answer}]})
+    return vlm._processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=(answer is None),
+    )
+
+
+def _extract_answer_value_positions(answer: str, prompt_idx: int) -> Dict[str, int]:
+    ans = answer.strip()
+    if prompt_idx == 0:
+        m = re.fullmatch(r"continuity=([A-H]);breaks=([A-H]);cause=([a-z_]+)", ans)
+        if not m:
+            return {}
+        return {
+            "continuity": ans.find("continuity=") + len("continuity="),
+            "breaks": ans.find("breaks=") + len("breaks="),
+            "cause": ans.find("cause=") + len("cause="),
+        }
+    if prompt_idx == 1:
+        m = re.fullmatch(r"nonvessel=([A-H]);fp_risk=([A-H]);source=([a-z_]+)", ans)
+        if not m:
+            return {}
+        return {
+            "nonvessel": ans.find("nonvessel=") + len("nonvessel="),
+            "fp_risk": ans.find("fp_risk=") + len("fp_risk="),
+            "source": ans.find("source=") + len("source="),
+        }
+    if prompt_idx == 2:
+        m = re.fullmatch(r"thin=([A-H]);periphery=([A-H]);visibility=([A-H])", ans)
+        if not m:
+            return {}
+        return {
+            "thin": ans.find("thin=") + len("thin="),
+            "periphery": ans.find("periphery=") + len("periphery="),
+            "visibility": ans.find("visibility=") + len("visibility="),
+        }
+    return {}
+
+
+def _tokenize_mm(vlm: "QwenVLMTextGenerator", image: Image.Image, text: str, device: torch.device) -> Dict[str, torch.Tensor]:
+    inputs = vlm._processor(text=[text], images=[image], return_tensors="pt", padding=True)
+    model = vlm._model
+    try:
+        model_device = next(model.parameters()).device
+    except StopIteration:
+        model_device = device
+    inputs = {k: v.to(model_device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
+    return inputs
+
+
+@torch.inference_mode()
+def _forward_logits(vlm: "QwenVLMTextGenerator", inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+    out = vlm._model(**inputs, return_dict=True)
+    return out.logits
+
+
+def _safe_single_token_id(tokenizer, s: str) -> int:
+    ids = tokenizer.encode(s, add_special_tokens=False)
+    if len(ids) == 0:
+        raise ValueError(f"Tokenizer produced empty ids for candidate '{s}'")
+    return ids[0]
+
+
+def _find_token_index_by_charpos(tokenizer, text: str, char_pos: int) -> Optional[int]:
+    try:
+        enc = tokenizer(text, return_tensors="pt", add_special_tokens=False, return_offsets_mapping=True)
+    except TypeError:
+        return None
+    offsets = enc.get("offset_mapping", None)
+    if offsets is None:
+        return None
+    offsets = offsets[0].tolist()
+    for t_idx, (s, e) in enumerate(offsets):
+        if s <= char_pos < e:
+            return t_idx
+    return None
+
+
+def _candidate_feature_for_field(
+    logits_step: torch.Tensor,
+    cand_token_ids: List[int],
+    mode: str,
+    temp: float,
+) -> np.ndarray:
+    cand_logits = logits_step[cand_token_ids].float()
+    if temp is None or temp <= 0:
+        temp = 1.0
+    cand_logits = cand_logits / float(temp)
+    if mode == "logit":
+        return cand_logits.detach().cpu().numpy()
+    logp = torch.log_softmax(cand_logits, dim=0)
+    return logp.detach().cpu().numpy()
+
+
+def _logits_feature_dim(include_unknown: bool = True) -> int:
+    label_len = len(LABELS) + (1 if include_unknown else 0)
+    label_fp_len = len(LABELS_FP) + (1 if include_unknown else 0)
+    level_len = len(LEVELS)
+    return (
+        2 * level_len + label_len
+        + 2 * level_len + label_fp_len
+        + 3 * level_len
+    )
 
 
 # =============================================================================
@@ -564,6 +696,7 @@ class VLMConditioner(nn.Module):
         cond_dim: int = 256,
         cache_dir: Optional[str] = None,
         prompt_template: Optional[str] = None,
+        prompt_templates: Optional[list[str]] = None,
         dtype: str = "auto",
         device_map: str | None = "auto",
         max_new_tokens: int = 48,
@@ -571,6 +704,18 @@ class VLMConditioner(nn.Module):
         text_mlp_hidden_dim: int = 256,
         embedding_dtype: str = "float16",
         use_text_prompt_cond: bool = False,
+        use_logits_feature_cond: bool = False,
+        logits_feature_mode: str = "logprob",
+        logits_logit_temp: float = 1.0,
+        logits_include_unknown: bool = True,
+        logits_center: bool = False,
+        logits_l2norm: bool = False,
+        p2_fallback: str = "uniform",
+        p2_prior_probs: Optional[list[float]] = None,
+        vlm_response_debug_enabled: bool = False,
+        vlm_response_debug_every_n_steps: int = 50,
+        input_mode: str = "raw",
+        overlay_alpha: float = 0.5,
         verbose: bool = False,
         verbose_debug: bool = False,
         update_interval_steps_train: int = 100,
@@ -591,6 +736,10 @@ class VLMConditioner(nn.Module):
         self.enabled = enabled
         self.cond_dim = cond_dim
         self.cache_dir = Path(cache_dir) if cache_dir else None
+        if prompt_templates:
+            self.prompt_templates = list(prompt_templates)
+        else:
+            self.prompt_templates = None
         self.prompt_template = prompt_template or self.DEFAULT_PROMPT
         self.verbose = verbose
         self.verbose_debug = verbose_debug
@@ -608,6 +757,24 @@ class VLMConditioner(nn.Module):
         self.pool = str(pool)
         self.embedding_dtype = _to_torch_dtype(embedding_dtype)
         self.use_text_prompt_cond = bool(use_text_prompt_cond)
+        self.use_logits_feature_cond = bool(use_logits_feature_cond)
+        self.logits_feature_mode = str(logits_feature_mode)
+        self.logits_logit_temp = float(logits_logit_temp)
+        self.logits_include_unknown = bool(logits_include_unknown)
+        self.logits_center = bool(logits_center)
+        self.logits_l2norm = bool(logits_l2norm)
+        self.p2_fallback = str(p2_fallback)
+        self.p2_prior_probs = None
+        if p2_prior_probs is not None:
+            try:
+                arr = np.asarray(p2_prior_probs, dtype=np.float32)
+                self.p2_prior_probs = arr
+            except Exception:
+                self.p2_prior_probs = None
+        self.vlm_response_debug_enabled = bool(vlm_response_debug_enabled)
+        self.vlm_response_debug_every_n_steps = int(vlm_response_debug_every_n_steps)
+        self.input_mode = str(input_mode).lower()
+        self.overlay_alpha = float(overlay_alpha)
         self.film_debug_enabled = bool(film_debug_enabled)
         self.film_debug_every_n_steps_train = int(film_debug_every_n_steps_train)
         self.film_debug_every_n_steps_val = int(film_debug_every_n_steps_val)
@@ -625,6 +792,7 @@ class VLMConditioner(nn.Module):
         self._last_key_warn_step = -1000
         self._last_mode = None
         self._last_val_log_step = None
+        self._warned_missing_mask = False
 
         if self.enabled:
             self.vlm_generator = QwenVLMTextGenerator(
@@ -637,7 +805,10 @@ class VLMConditioner(nn.Module):
             )
             self.vlm_generator._load_model()
             if self.use_text_prompt_cond:
-                embed_dim = self.vlm_generator.get_text_embed_dim()
+                if self.use_logits_feature_cond:
+                    embed_dim = _logits_feature_dim(include_unknown=self.logits_include_unknown)
+                else:
+                    embed_dim = self.vlm_generator.get_text_embed_dim()
                 self.text_to_cond = TextToConditionVector(
                     embed_dim=embed_dim,
                     cond_dim=cond_dim,
@@ -694,6 +865,314 @@ class VLMConditioner(nn.Module):
             return feat.view(feat.size(0), -1)
         return feat
 
+    def _postprocess_logits_feature(
+        self, e_text_batch: torch.Tensor, prompts: List[str]
+    ) -> torch.Tensor:
+        """Optional centering/L2 normalization for logits-feature conditioning."""
+        if not (self.logits_center or self.logits_l2norm):
+            return e_text_batch
+        if e_text_batch.dim() != 2:
+            return e_text_batch
+
+        level_len = len(LEVELS)
+        label_len = len(LABELS) + (1 if self.logits_include_unknown else 0)
+        label_fp_len = len(LABELS_FP) + (1 if self.logits_include_unknown else 0)
+        per_prompt_dims = [2 * level_len + label_len, 2 * level_len + label_fp_len, 3 * level_len]
+        total_expected = sum(per_prompt_dims)
+
+        # Fallback: normalize whole vector if prompt layout is unexpected
+        if len(prompts) != 3 or e_text_batch.shape[1] != total_expected:
+            x = e_text_batch
+            if self.logits_center:
+                x = x - x.mean(dim=0, keepdim=True)
+            if self.logits_l2norm:
+                x = x / (x.norm(dim=1, keepdim=True) + 1e-8)
+            return x
+
+        chunks = []
+        start = 0
+        for dim in per_prompt_dims:
+            end = start + dim
+            seg = e_text_batch[:, start:end]
+            if self.logits_center:
+                seg = seg - seg.mean(dim=0, keepdim=True)
+            if self.logits_l2norm:
+                seg = seg / (seg.norm(dim=1, keepdim=True) + 1e-8)
+            chunks.append(seg)
+            start = end
+        return torch.cat(chunks, dim=1)
+
+    @torch.inference_mode()
+    def _extract_logits_feature(
+        self,
+        image: Image.Image,
+        prompt: str,
+        answer: str,
+        prompt_idx: int,
+    ) -> torch.Tensor:
+        """Extract candidate-token logits feature for p0/p1/p2 prompts."""
+        vlm = self.vlm_generator
+        tok = _get_tokenizer(vlm)
+
+        prefix_text = _build_chat_text(vlm, image, prompt, answer=None)
+        full_text = _build_chat_text(vlm, image, prompt, answer=answer)
+
+        device = get_model_input_device(vlm._model)
+        prefix_inputs = _tokenize_mm(vlm, image, prefix_text, device=device)
+        full_inputs = _tokenize_mm(vlm, image, full_text, device=device)
+
+        prefix_ids = prefix_inputs.get("input_ids")
+        full_ids = full_inputs.get("input_ids")
+        if prefix_ids is None or full_ids is None:
+            raise RuntimeError("Processor did not return input_ids for logits feature extraction.")
+
+        prefix_len = int(prefix_ids.shape[1])
+        full_len = int(full_ids.shape[1])
+        logits = _forward_logits(vlm, full_inputs)
+
+        ans = answer.strip()
+        positions = _extract_answer_value_positions(ans, prompt_idx)
+        if not positions:
+            # If parsing failed, p2 uses dedicated fallback; others use uniform.
+            if prompt_idx == 2:
+                return self._p2_fallback_feature()
+            label_len = len(LABELS) + (1 if self.logits_include_unknown else 0)
+            label_fp_len = len(LABELS_FP) + (1 if self.logits_include_unknown else 0)
+            if prompt_idx == 0:
+                K = 2 * len(LEVELS) + label_len
+            else:
+                K = 2 * len(LEVELS) + label_fp_len
+            probs = np.ones((K,), dtype=np.float32) / float(K)
+            feat = np.log(np.clip(probs, 1e-12, 1.0)).astype(np.float32)
+            return torch.from_numpy(feat)
+
+        if prompt_idx == 0:
+            label_cands = list(LABELS) + ([UNK_LABEL] if self.logits_include_unknown else [])
+            label_ids = [_safe_single_token_id(tok, s) for s in label_cands]
+            level_ids = [_safe_single_token_id(tok, s) for s in LEVELS]
+            cand_ids_map = {"continuity": level_ids, "breaks": level_ids, "cause": label_ids}
+        elif prompt_idx == 1:
+            label_cands = list(LABELS_FP) + ([UNK_LABEL] if self.logits_include_unknown else [])
+            label_ids = [_safe_single_token_id(tok, s) for s in label_cands]
+            level_ids = [_safe_single_token_id(tok, s) for s in LEVELS]
+            cand_ids_map = {"nonvessel": level_ids, "fp_risk": level_ids, "source": label_ids}
+        else:
+            level_ids = [_safe_single_token_id(tok, s) for s in LEVELS]
+            cand_ids_map = {"thin": level_ids, "periphery": level_ids, "visibility": level_ids}
+
+        feat_parts: List[np.ndarray] = []
+        for field, char_pos in positions.items():
+            t_idx_ans = _find_token_index_by_charpos(tok, ans, char_pos)
+            if t_idx_ans is None:
+                if prompt_idx == 2:
+                    return self._p2_fallback_feature()
+                K = len(cand_ids_map[field])
+                probs = np.ones((K,), dtype=np.float32) / float(K)
+                feat_parts.append(np.log(np.clip(probs, 1e-12, 1.0)).astype(np.float32))
+                continue
+            t_idx_full = prefix_len + t_idx_ans
+            step = t_idx_full - 1
+            if step < 0 or step >= full_len:
+                if prompt_idx == 2:
+                    return self._p2_fallback_feature()
+                K = len(cand_ids_map[field])
+                probs = np.ones((K,), dtype=np.float32) / float(K)
+                feat_parts.append(np.log(np.clip(probs, 1e-12, 1.0)).astype(np.float32))
+                continue
+            logits_step = logits[0, step, :]
+            cand_ids = cand_ids_map[field]
+            if not cand_ids:
+                if prompt_idx == 2:
+                    return self._p2_fallback_feature()
+                K = len(cand_ids_map[field])
+                probs = np.ones((K,), dtype=np.float32) / float(K)
+                feat_parts.append(np.log(np.clip(probs, 1e-12, 1.0)).astype(np.float32))
+                continue
+            f = _candidate_feature_for_field(
+                logits_step,
+                cand_ids,
+                mode=self.logits_feature_mode,
+                temp=self.logits_logit_temp,
+            )
+            feat_parts.append(f)
+        feat = np.concatenate(feat_parts, axis=0).astype(np.float32)
+        return torch.from_numpy(feat)
+
+    def _p2_fallback_feature(self) -> torch.Tensor:
+        """Fallback feature for p2 parsing/alignment failures (never returns zeros)."""
+        K = 3 * len(LEVELS)
+        probs = None
+        if self.p2_fallback == "prior" and self.p2_prior_probs is not None:
+            if isinstance(self.p2_prior_probs, np.ndarray) and self.p2_prior_probs.shape[0] == K:
+                probs = self.p2_prior_probs.astype(np.float32, copy=True)
+        if probs is None:
+            probs = np.ones((K,), dtype=np.float32) / float(K)
+        feat = np.log(np.clip(probs, 1e-12, 1.0)).astype(np.float32)
+        return torch.from_numpy(feat)
+
+    def _extract_logits_feature_with_debug(
+        self,
+        image: Image.Image,
+        prompt: str,
+        answer: str,
+        prompt_idx: int,
+    ) -> Tuple[torch.Tensor, Dict[str, dict]]:
+        """Extract logits feature and return per-field top-1 summaries."""
+        vlm = self.vlm_generator
+        tok = _get_tokenizer(vlm)
+
+        prefix_text = _build_chat_text(vlm, image, prompt, answer=None)
+        full_text = _build_chat_text(vlm, image, prompt, answer=answer)
+
+        device = get_model_input_device(vlm._model)
+        prefix_inputs = _tokenize_mm(vlm, image, prefix_text, device=device)
+        full_inputs = _tokenize_mm(vlm, image, full_text, device=device)
+
+        prefix_ids = prefix_inputs.get("input_ids")
+        full_ids = full_inputs.get("input_ids")
+        if prefix_ids is None or full_ids is None:
+            raise RuntimeError("Processor did not return input_ids for logits feature extraction.")
+
+        prefix_len = int(prefix_ids.shape[1])
+        full_len = int(full_ids.shape[1])
+        logits = _forward_logits(vlm, full_inputs)
+
+        ans = answer.strip()
+        positions = _extract_answer_value_positions(ans, prompt_idx)
+        if not positions:
+            if prompt_idx == 2:
+                return self._p2_fallback_feature(), {"fallback": "p2"}
+            label_len = len(LABELS) + (1 if self.logits_include_unknown else 0)
+            label_fp_len = len(LABELS_FP) + (1 if self.logits_include_unknown else 0)
+            if prompt_idx == 0:
+                K = 2 * len(LEVELS) + label_len
+            else:
+                K = 2 * len(LEVELS) + label_fp_len
+            probs = np.ones((K,), dtype=np.float32) / float(K)
+            feat = np.log(np.clip(probs, 1e-12, 1.0)).astype(np.float32)
+            return torch.from_numpy(feat), {"fallback": "uniform"}
+
+        if prompt_idx == 0:
+            label_cands = list(LABELS) + ([UNK_LABEL] if self.logits_include_unknown else [])
+            label_ids = [_safe_single_token_id(tok, s) for s in label_cands]
+            level_ids = [_safe_single_token_id(tok, s) for s in LEVELS]
+            cand_ids_map = {
+                "continuity": (LEVELS, level_ids),
+                "breaks": (LEVELS, level_ids),
+                "cause": (label_cands, label_ids),
+            }
+        elif prompt_idx == 1:
+            label_cands = list(LABELS_FP) + ([UNK_LABEL] if self.logits_include_unknown else [])
+            label_ids = [_safe_single_token_id(tok, s) for s in label_cands]
+            level_ids = [_safe_single_token_id(tok, s) for s in LEVELS]
+            cand_ids_map = {
+                "nonvessel": (LEVELS, level_ids),
+                "fp_risk": (LEVELS, level_ids),
+                "source": (label_cands, label_ids),
+            }
+        else:
+            level_ids = [_safe_single_token_id(tok, s) for s in LEVELS]
+            cand_ids_map = {
+                "thin": (LEVELS, level_ids),
+                "periphery": (LEVELS, level_ids),
+                "visibility": (LEVELS, level_ids),
+            }
+
+        feat_parts: List[np.ndarray] = []
+        field_dbg: Dict[str, dict] = {}
+        for field, char_pos in positions.items():
+            t_idx_ans = _find_token_index_by_charpos(tok, ans, char_pos)
+            if t_idx_ans is None:
+                if prompt_idx == 2:
+                    return self._p2_fallback_feature(), {"fallback": "p2"}
+                labels, ids = cand_ids_map[field]
+                K = len(ids)
+                probs = np.ones((K,), dtype=np.float32) / float(K)
+                feat_parts.append(np.log(np.clip(probs, 1e-12, 1.0)).astype(np.float32))
+                field_dbg[field] = {"fallback": "uniform"}
+                continue
+            t_idx_full = prefix_len + t_idx_ans
+            step = t_idx_full - 1
+            if step < 0 or step >= full_len:
+                if prompt_idx == 2:
+                    return self._p2_fallback_feature(), {"fallback": "p2"}
+                labels, ids = cand_ids_map[field]
+                K = len(ids)
+                probs = np.ones((K,), dtype=np.float32) / float(K)
+                feat_parts.append(np.log(np.clip(probs, 1e-12, 1.0)).astype(np.float32))
+                field_dbg[field] = {"fallback": "uniform"}
+                continue
+            logits_step = logits[0, step, :]
+            labels, ids = cand_ids_map[field]
+            if not ids:
+                if prompt_idx == 2:
+                    return self._p2_fallback_feature(), {"fallback": "p2"}
+                field_dbg[field] = {"fallback": "uniform"}
+                continue
+            cand_logits = logits_step[ids].float()
+            temp = self.logits_logit_temp if self.logits_logit_temp > 0 else 1.0
+            cand_logits = cand_logits / float(temp)
+            probs_t = torch.softmax(cand_logits, dim=0)
+            top_idx = int(torch.argmax(probs_t).item())
+            field_dbg[field] = {"top": labels[top_idx], "top_p": float(probs_t[top_idx].item())}
+            f = _candidate_feature_for_field(
+                logits_step,
+                ids,
+                mode=self.logits_feature_mode,
+                temp=self.logits_logit_temp,
+            )
+            feat_parts.append(f)
+
+        feat = np.concatenate(feat_parts, axis=0).astype(np.float32)
+        return torch.from_numpy(feat), field_dbg
+
+    def _prepare_vlm_images(self, images: torch.Tensor, batch: Optional[dict]) -> torch.Tensor:
+        mode = self.input_mode
+        if mode == "raw":
+            return images
+
+        if isinstance(batch, dict):
+            direct = batch.get("vlm_input_image")
+            if torch.is_tensor(direct):
+                return direct
+
+        pred_mask = None
+        if isinstance(batch, dict):
+            pm = batch.get("vlm_pred_mask")
+            if pm is None:
+                pm = batch.get("pred_mask")
+            if torch.is_tensor(pm):
+                pred_mask = pm
+
+        if pred_mask is None:
+            if not self._warned_missing_mask and self.verbose:
+                print(f"[VLM] input_mode={mode} but pred_mask not found in batch; using raw images.")
+                self._warned_missing_mask = True
+            return images
+
+        if pred_mask.dim() == 3:
+            pred_mask = pred_mask.unsqueeze(1)
+        pred_mask = (pred_mask > 0.5).float().to(images.device)
+
+        if mode == "mask_only":
+            return pred_mask
+
+        if mode == "overlay":
+            base = images
+            if base.min() < 0:
+                base = (base + 1.0) / 2.0
+            base = torch.clamp(base, 0.0, 1.0)
+            if base.size(1) == 1:
+                base = base.repeat(1, 3, 1, 1)
+            alpha = float(self.overlay_alpha)
+            overlay = base.clone()
+            overlay[:, 0:1] = (1.0 - alpha * pred_mask) * base[:, 0:1] + alpha * pred_mask
+            overlay[:, 1:2] = (1.0 - alpha * pred_mask) * base[:, 1:2]
+            overlay[:, 2:3] = (1.0 - alpha * pred_mask) * base[:, 2:3]
+            return overlay
+
+        return images
+
     def _get_fallback_vision_dim(self) -> int:
         if self.image_to_cond is not None:
             proj = self.image_to_cond.proj
@@ -718,62 +1197,107 @@ class VLMConditioner(nn.Module):
         if not self.enabled:
             return None
 
+        image = self._prepare_vlm_images(image, batch)
         batch_size = image.shape[0]
         device = image.device
 
         step = int(global_step) if global_step is not None else -1
         per_sample = self.batch_strategy == "per_sample"
+        batch_vlm = batch
+        if isinstance(batch, dict) and self.input_mode != "raw":
+            batch_vlm = dict(batch)
+            batch_vlm["vlm_cache_suffix"] = f"vlm:{self.input_mode}"
         image_ids, key_source = self._get_image_ids(
-            batch=batch,
+            batch=batch_vlm,
             images=image,
             step=step,
         )
 
-        final_prompt = prompt or self.prompt_template
-        prompt_hash = hashlib.md5(final_prompt.encode()).hexdigest()[:8] if self.use_text_prompt_cond else "img"
+        if prompt is not None:
+            prompts = [prompt] if isinstance(prompt, str) else list(prompt)
+        elif self.prompt_templates:
+            prompts = list(self.prompt_templates)
+        else:
+            prompts = [self.prompt_template]
+        prompt_hash = "img"
         interval = self.update_interval_steps_train if is_train else self.update_interval_steps_eval
         reuse_reason = "generated"
+
+        resp_debug = None
+        resp_should_log = False
+        if self.vlm_response_debug_enabled:
+            if is_train:
+                if step >= 0 and self.vlm_response_debug_every_n_steps > 0:
+                    resp_should_log = (step % self.vlm_response_debug_every_n_steps == 0)
+            else:
+                resp_should_log = True
 
         diag = None
         if per_sample:
             # Per-sample conditioning (no cross-sample reuse in training)
             if self.use_text_prompt_cond:
                 e_text_list: List[torch.Tensor] = []
-                text_list: List[str] = []
                 for i in range(batch_size):
                     sample_id = image_ids[i] if image_ids else None
-                    text_i = None
-                    e_i = None
-                    if sample_id is not None:
-                        cached = self._load_from_cache(sample_id, prompt_hash)
-                        if cached is not None:
-                            text_i = cached.get("text")
-                            e_i = cached.get("e_text")
-                            if e_i is not None:
-                                self.stats["disk_hit"] += 1
-                    if e_i is None:
-                        pil_image = self._torch_to_pil(image[i])
-                        with torch.no_grad():
-                            text_i = self.vlm_generator.generate_text(pil_image, final_prompt)
-                            e_i = self.vlm_generator.embed_text(text_i, pool=self.pool).to(self.embedding_dtype)
-                        self._debug_generate_calls += 1
-                        self.stats["generated"] += 1
-                        self.stats["miss"] += 1
+                    feats_per_prompt: List[torch.Tensor] = []
+                    for p_idx, p in enumerate(prompts):
+                        prompt_hash = hashlib.md5(p.encode()).hexdigest()[:8]
+                        text_i = None
+                        e_i = None
                         if sample_id is not None:
-                            self._save_to_cache(sample_id, prompt_hash, text=text_i, e_text=e_i)
-                    if e_i is None:
-                        e_i = torch.zeros(self.vlm_generator.get_text_embed_dim(), dtype=self.embedding_dtype)
-                        if text_i is None:
-                            text_i = ""
-                    if e_i.dim() == 2 and e_i.size(0) == 1:
-                        e_i = e_i.squeeze(0)
-                    if isinstance(e_i, torch.Tensor):
-                        e_i = e_i.detach().cpu()
-                    e_text_list.append(e_i)
-                    text_list.append(text_i or "")
+                            cached = self._load_from_cache(sample_id, prompt_hash)
+                            if cached is not None:
+                                text_i = cached.get("text")
+                                e_i = cached.get("e_text")
+                                if e_i is not None:
+                                    self.stats["disk_hit"] += 1
+                        if e_i is None:
+                            pil_image = self._torch_to_pil(image[i])
+                            with torch.no_grad():
+                                text_i = self.vlm_generator.generate_text(pil_image, p)
+                                if self.use_logits_feature_cond:
+                                    if resp_should_log and resp_debug is None and i == 0:
+                                        e_i, dbg = self._extract_logits_feature_with_debug(
+                                            pil_image, p, text_i, p_idx
+                                        )
+                                        resp_debug = {
+                                            "image_id": sample_id,
+                                            "prompt_idx": int(p_idx),
+                                            "response": text_i,
+                                            "source": "generated",
+                                            "fields": dbg,
+                                        }
+                                        e_i = e_i.to(self.embedding_dtype)
+                                    else:
+                                        e_i = self._extract_logits_feature(pil_image, p, text_i, p_idx).to(self.embedding_dtype)
+                                else:
+                                    e_i = self.vlm_generator.embed_text(text_i, pool=self.pool).to(self.embedding_dtype)
+                            self._debug_generate_calls += 1
+                            self.stats["generated"] += 1
+                            self.stats["miss"] += 1
+                            if sample_id is not None:
+                                self._save_to_cache(sample_id, prompt_hash, text=text_i, e_text=e_i)
+                        elif resp_should_log and resp_debug is None and i == 0:
+                            resp_debug = {
+                                "image_id": sample_id,
+                                "prompt_idx": int(p_idx),
+                                "response": text_i,
+                                "source": "cache",
+                                "fields": {"note": "no_logits_recomputed"},
+                            }
+                        if e_i is None:
+                            e_i = torch.zeros(self.vlm_generator.get_text_embed_dim(), dtype=self.embedding_dtype)
+                        if e_i.dim() == 2 and e_i.size(0) == 1:
+                            e_i = e_i.squeeze(0)
+                        if isinstance(e_i, torch.Tensor):
+                            e_i = e_i.detach().cpu()
+                        feats_per_prompt.append(e_i)
+                    e_text_list.append(torch.cat(feats_per_prompt, dim=0))
 
                 target_dtype = next(self.text_to_cond.parameters()).dtype
                 e_text_batch = torch.stack(e_text_list, dim=0).to(device=device, dtype=target_dtype).detach()
+                if self.use_logits_feature_cond:
+                    e_text_batch = self._postprocess_logits_feature(e_text_batch, prompts)
                 cond_vec_batch = self.text_to_cond(e_text_batch)
                 reuse_reason = "per_sample"
             else:
@@ -826,65 +1350,41 @@ class VLMConditioner(nn.Module):
             rep_id = image_ids[rep_idx] if image_ids else None
 
             if self.use_text_prompt_cond:
-                text = None
-                e_text = None
-
-                can_reuse = self._last_text is not None and self._last_profile_prompt_hash == prompt_hash
-                if can_reuse:
-                    if self.reuse_policy == "step_interval":
-                        if step >= 0 and (step - self._last_profile_step) < interval:
-                            text = self._last_text
-                            e_text = self._last_e_text
-                            reuse_reason = "interval"
-                            self.stats["mem_hit"] += batch_size
-                    elif self.reuse_policy == "image_id":
-                        if (
-                            rep_id is not None
-                            and rep_id == self._last_profile_image_key
-                            and (step < 0 or (step - self._last_profile_step) < interval)
-                        ):
-                            text = self._last_text
-                            e_text = self._last_e_text
-                            reuse_reason = "image_id"
-                            self.stats["mem_hit"] += batch_size
-
-                if text is None and rep_id is not None:
-                    cached = self._load_from_cache(rep_id, prompt_hash)
-                    if cached is not None:
-                        text = cached.get("text")
-                        e_text = cached.get("e_text")
-                        if e_text is not None:
-                            reuse_reason = "disk_cache"
-                            self.stats["disk_hit"] += batch_size
-
-                if text is None or e_text is None:
-                    pil_image = self._torch_to_pil(rep_img)
-                    with torch.no_grad():
-                        text = self.vlm_generator.generate_text(pil_image, final_prompt)
-                        e_text = self.vlm_generator.embed_text(text, pool=self.pool).to(self.embedding_dtype)
-                    self._debug_generate_calls += 1
-                    self.stats["generated"] += batch_size
-                    self.stats["miss"] += batch_size
+                feats_per_prompt: List[torch.Tensor] = []
+                for p_idx, p in enumerate(prompts):
+                    prompt_hash = hashlib.md5(p.encode()).hexdigest()[:8]
+                    text = None
+                    e_text = None
                     if rep_id is not None:
-                        self._save_to_cache(rep_id, prompt_hash, text=text, e_text=e_text)
+                        cached = self._load_from_cache(rep_id, prompt_hash)
+                        if cached is not None:
+                            text = cached.get("text")
+                            e_text = cached.get("e_text")
+                            if e_text is not None:
+                                self.stats["disk_hit"] += batch_size
+                    if text is None or e_text is None:
+                        pil_image = self._torch_to_pil(rep_img)
+                        with torch.no_grad():
+                            text = self.vlm_generator.generate_text(pil_image, p)
+                            if self.use_logits_feature_cond:
+                                e_text = self._extract_logits_feature(pil_image, p, text, p_idx).to(self.embedding_dtype)
+                            else:
+                                e_text = self.vlm_generator.embed_text(text, pool=self.pool).to(self.embedding_dtype)
+                        self._debug_generate_calls += 1
+                        self.stats["generated"] += batch_size
+                        self.stats["miss"] += batch_size
+                        if rep_id is not None:
+                            self._save_to_cache(rep_id, prompt_hash, text=text, e_text=e_text)
+                    feats_per_prompt.append(e_text.detach().cpu())
 
-                # Update last cache (text + e_text only, no graph)
-                self._last_text = text
-                self._last_e_text = e_text.detach()
-                if text is not None and e_text is not None:
-                    self._last_profile_step = step
-                self._last_profile_prompt_hash = prompt_hash
-                self._last_profile_image_key = rep_id
-
-                # cond_vec fresh each step (grad-enabled)
                 target_dtype = next(self.text_to_cond.parameters()).dtype
-                e_text = e_text.to(device=device, dtype=target_dtype).detach()
+                e_text = torch.cat(feats_per_prompt, dim=0).to(device=device, dtype=target_dtype).detach()
                 if e_text.dim() == 1:
                     e_text = e_text.unsqueeze(0)
                 e_text_batch = e_text
                 if e_text_batch.size(0) == 1 and batch_size > 1:
                     e_text_batch = e_text_batch.expand(batch_size, -1)
-                cond_vec = self.text_to_cond(e_text)
+                cond_vec = self.text_to_cond(e_text_batch)
                 cond_vec_batch = cond_vec.expand(batch_size, -1).contiguous()
             else:
                 image_feat = None
@@ -1117,6 +1617,8 @@ class VLMConditioner(nn.Module):
                 "mixed_keys": mixed_keys,
                 "should_log": bool(should_log),
             }
+            if resp_debug is not None:
+                dbg_payload["vlm_response_debug"] = resp_debug
             out["_dbg"] = dbg_payload
         return out
 
@@ -1138,12 +1640,22 @@ class VLMConditioner(nn.Module):
         if not torch.is_tensor(images):
             return
 
+        images = self._prepare_vlm_images(images, batch)
+
         batch_size = int(images.shape[0])
         warm_step = int(step) if step is not None else 0
-        image_ids, key_source = self._get_image_ids(batch=batch, images=images, step=warm_step)
+        batch_vlm = batch
+        if isinstance(batch, dict) and self.input_mode != "raw":
+            batch_vlm = dict(batch)
+            batch_vlm["vlm_cache_suffix"] = f"vlm:{self.input_mode}"
+        image_ids, key_source = self._get_image_ids(batch=batch_vlm, images=images, step=warm_step)
 
-        final_prompt = prompt or self.prompt_template
-        prompt_hash = hashlib.md5(final_prompt.encode()).hexdigest()[:8] if self.use_text_prompt_cond else "img"
+        if prompt is not None:
+            prompts = [prompt] if isinstance(prompt, str) else list(prompt)
+        elif self.prompt_templates:
+            prompts = list(self.prompt_templates)
+        else:
+            prompts = [self.prompt_template]
 
         if unique_only:
             if not hasattr(self, "_warmup_seen"):
@@ -1160,29 +1672,36 @@ class VLMConditioner(nn.Module):
                 if sample_id in seen:
                     continue
                 seen.add(sample_id)
-            cached = self._load_from_cache(sample_id, prompt_hash)
-            if cached is not None:
-                has_payload = False
-                if self.use_text_prompt_cond:
-                    has_payload = cached.get("e_text") is not None
-                else:
-                    has_payload = cached.get("image_feat") is not None
-                if has_payload:
+            pil_image = self._torch_to_pil(images[i])
+            if self.use_text_prompt_cond:
+                for p_idx, p in enumerate(prompts):
+                    prompt_hash = hashlib.md5(p.encode()).hexdigest()[:8]
+                    cached = self._load_from_cache(sample_id, prompt_hash)
+                    if cached is not None and cached.get("e_text") is not None:
+                        self.stats["disk_hit"] += 1
+                        self.stats["total"] += 1
+                        continue
+                    text_i = self.vlm_generator.generate_text(pil_image, p)
+                    if self.use_logits_feature_cond:
+                        e_i = self._extract_logits_feature(pil_image, p, text_i, p_idx).to(self.embedding_dtype)
+                    else:
+                        e_i = self.vlm_generator.embed_text(text_i, pool=self.pool).to(self.embedding_dtype)
+                    self._save_to_cache(sample_id, prompt_hash, text=text_i, e_text=e_i)
+                    self.stats["generated"] += 1
+                    self.stats["miss"] += 1
+                    self.stats["total"] += 1
+            else:
+                prompt_hash = "img"
+                cached = self._load_from_cache(sample_id, prompt_hash)
+                if cached is not None and cached.get("image_feat") is not None:
                     self.stats["disk_hit"] += 1
                     self.stats["total"] += 1
                     continue
-
-            pil_image = self._torch_to_pil(images[i])
-            if self.use_text_prompt_cond:
-                text_i = self.vlm_generator.generate_text(pil_image, final_prompt)
-                e_i = self.vlm_generator.embed_text(text_i, pool=self.pool).to(self.embedding_dtype)
-                self._save_to_cache(sample_id, prompt_hash, text=text_i, e_text=e_i)
-            else:
                 feat_i = self.vlm_generator.embed_image(pil_image).to(self.embedding_dtype)
                 self._save_to_cache(sample_id, prompt_hash, image_feat=feat_i)
-            self.stats["generated"] += 1
-            self.stats["miss"] += 1
-            self.stats["total"] += 1
+                self.stats["generated"] += 1
+                self.stats["miss"] += 1
+                self.stats["total"] += 1
 
         if self.verbose and self.log_every_n_steps > 0 and (warm_step % self.log_every_n_steps == 0):
             first_key = image_ids[0] if image_ids else "unknown"
@@ -1210,9 +1729,13 @@ class VLMConditioner(nn.Module):
     ) -> tuple[list[str], str]:
         batch_size = int(images.shape[0])
         split = "unknown"
+        suffix = None
         if isinstance(batch, dict):
             split = batch.get("split") or batch.get("stage") or batch.get("mode") or split
+            suffix = batch.get("vlm_cache_suffix")
         split = str(split)
+        if suffix is not None:
+            suffix = str(suffix)
 
         def _to_list(value, bsz: int):
             if isinstance(value, (list, tuple)):
@@ -1237,6 +1760,8 @@ class VLMConditioner(nn.Module):
                     keys.append(f"{split}:unknown")
                 else:
                     keys.append(f"{split}:{key}")
+            if suffix:
+                return [f"{k}|{suffix}" for k in keys]
             return keys
 
         source = "fallback"

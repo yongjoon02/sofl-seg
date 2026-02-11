@@ -1,0 +1,13 @@
+FINDINGS:
+Left main coronary artery (LM): Patent without significant stenosis.
+Left anterior descending artery (LAD): Proximal 70% stenosis with diffuse mid-vessel atherosclerotic disease; distal LAD has reduced opacification.
+Left circumflex artery (LCx): Mild (30%) stenosis in the mid segment; obtuse marginal branches are patent.
+Right coronary artery (RCA): Chronic total occlusion in the mid segment with collateral filling from LAD; distal RCA is faintly visualized.
+TIMI flow: LAD TIMI 2; LCx TIMI 3; RCA TIMI 0.
+Catheter/guidewire overlap is present in the proximal RCA projection.
+No evidence of coronary aneurysm.
+
+IMPRESSION:
+Severe proximal LAD stenosis with reduced distal flow.
+Chronic total occlusion of mid RCA with collateral filling.
+Mild LCx disease.

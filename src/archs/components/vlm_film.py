@@ -231,6 +231,7 @@ def apply_vlm_film(
                     "cond_cos_mean": dbg.get("cond_cos_mean"),
                     "cond_cos_min": dbg.get("cond_cos_min"),
                     "cond_cos_max": dbg.get("cond_cos_max"),
+                    "vlm_response_debug": dbg.get("vlm_response_debug"),
                     "film_mode": film_mode,
                     "gamma_mean": gamma_mean,
                     "gamma_std": gamma_std,
@@ -290,4 +291,3 @@ def apply_vlm_film(
                     _FILM_SHUFFLE_LOGGED = True
 
     return x, payload
-

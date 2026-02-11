@@ -7,14 +7,56 @@ model:
   debug_dfm: false
 
   use_vlm_film: true
-  vlm_film_decoder_stages: [0, 1]  # 후반 2개 스테이지 (64ch, 32ch)에만 적용
+  vlm_film_decoder_stages: [1,2]  # 후반 2개 스테이지 (64ch, 32ch)에만 적용
   vlm_film_config:
     model_name: "Qwen/Qwen2.5-VL-3B-Instruct"
     cond_dim: 256
     cache_dir: "cache/vlm_profiles"
     batch_strategy: "per_sample"  # CRITICAL: per-sample conditioning (not "first")
     update_interval_steps_train: 25  # ~1 epoch (155 samples / 6 batch = 26 steps)
-    update_interval_steps_eval: 1    # Always fresh in validation
+    update_interval_steps_eval: 25    # Always fresh in validation
+    use_text_prompt_cond: true
+    use_logits_feature_cond: true
+    logits_feature_mode: "logprob"
+    logits_logit_temp: 1.0
+    logits_center: true
+    logits_l2norm: true
+    logits_include_unknown: true
+    max_new_tokens: 32
+    mem_cache_size: 1024
+    prompt_templates:
+      - |
+        Output EXACTLY one line:
+        continuity=LEVEL;breaks=LEVEL;cause=LABEL
+        Rules:
+        - LEVEL MUST be exactly one of: A,B,C,D,E,F,G,H (A=very_low ... H=max).
+        - LABEL MUST be exactly one of: low_contrast, motion, overlap, catheter, clutter, noise, blur, other.
+        - Decide based ONLY on the angiogram image (and overlay if present).
+        - Output MUST contain NO spaces and NO extra words.
+        If you violate the format, output again correctly.
+      - |
+        Output EXACTLY one line:
+        nonvessel=LEVEL;fp_risk=LEVEL;source=LABEL
+        Rules:
+        - LEVEL MUST be exactly one of: A,B,C,D,E,F,G,H (A=very_low ... H=max).
+        - LABEL MUST be exactly one of: background, catheter, bone, saturation, texture, artifact, blur, other.
+        - Decide based ONLY on the angiogram image (and overlay if present).
+        - Output MUST contain NO spaces and NO extra words.
+        If you violate the format, output again correctly.
+      - |
+        Output EXACTLY one line:
+        thin=LEVEL;periphery=LEVEL;visibility=LEVEL
+        Rules:
+        - LEVEL MUST be exactly one of: A,B,C,D,E,F,G,H (A=very_low ... H=max).
+        - Decide based ONLY on the angiogram image (and overlay if present).
+        - Output MUST contain NO spaces and NO extra words.
+        If you violate the format, output again correctly.
+        
+    input_mode: "overlay"   # raw | overlay | mask_only
+    overlay_alpha: 0.5
+    pred_threshold: 0.5
+    pred_update_interval_steps: 25
+    pred_warmup_epochs: 1
     # FiLM parameters (deprecated - using unconstrained γ=1+Linear(c), β=Linear(c))
     gamma_scale: 0.1  # Not used: identity-init allows unbounded learning
     beta_scale: 0.1   # Not used: identity-init allows unbounded learning
@@ -22,11 +64,13 @@ model:
     film_debug_enabled: true
     film_debug_every_n_steps_train: 50   # 원하는 주기
     film_debug_every_n_steps_val: 20
+    vlm_response_debug_enabled: true
+    vlm_response_debug_every_n_steps: 50
   
   # Junction-aware FiLM gating (topology safety gate)
   # Controls spatial application of VLM-FiLM modulation to reduce false positives at vessel junctions
   junction_gating_config:
-    enabled: true                    
+    enabled: false                   
     warmup_epochs: 5  # Reduced: junction artifacts appear early in training
     source: "pred"               
     threshold: 0.5               
@@ -74,24 +118,30 @@ model:
     name: flow_matching
     params:
       scheme: l2
+  topo_loss:
+    enabled: true
+    lambda_weight: 0.05
+    topo_size: 128
+    maxdim: 1
 
 data:
   name: xca
   train_dir: data/xca_full/train
   val_dir: data/xca_full/val
   test_dir: data/xca_full/test
-  train_bs: 6  # VLM-FiLM 메모리 고려하여 4 유지
+  train_bs: 6  
   image_size: 320
   num_samples_per_image: 16  # 메모리 최적화
   use_sauna_transform: false
 
 trainer:
-  max_epochs: 500
+  max_epochs: 400
   accelerator: gpu
   devices: 1
   precision: 16-mixed
   enable_progress_bar: true
   check_val_every_n_epoch: 15
-  accumulate_grad_batches: 8  # 실효 배치: 4 × 12 = 48 (기본 DFM과 동일)
+  accumulate_grad_batches: 8  
   log_every_n_steps: 10
+
   gradient_clip_val: 1.0

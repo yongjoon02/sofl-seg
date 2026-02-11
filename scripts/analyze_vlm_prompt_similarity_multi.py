@@ -30,42 +30,40 @@ TextToConditionVector = _vlm_module.TextToConditionVector
 # -----------------------------
 # Use single-token labels to avoid multi-token splitting issues.
 LEVELS = ["A", "B", "C", "D", "E", "F", "G", "H"]  # A=very_low ... H=max
-LABELS = ["A", "B", "C", "D", "E", "F", "G", "H"]
+LABELS = ["low_contrast", "motion", "overlap", "catheter", "clutter", "noise", "blur", "other"]
+LABELS_FP = ["background", "catheter", "bone", "saturation", "texture", "artifact", "blur", "other"]
 UNK_LABEL = "unknown"  # used only for p2 fallback and invalid parsing
 
 DEFAULT_PROMPTS = [
-    # (p0) Two 5-way categorical ratings
+    # (p0) Continuity + breaks + cause (targeting reconnection)
     (
         "Output EXACTLY one line:\n"
-        "contrast=LEVEL;fragmentation=LEVEL;thinness=LEVEL\n"
+        "continuity=LEVEL;breaks=LEVEL;cause=LABEL\n"
         "Rules:\n"
-        "- LEVEL MUST be exactly one of: A,B,C,D,E,F,G,H.\n"
-        "- A=very_low, B=low, C=mid, D=mid_high, E=high, F=very_high, G=extreme, H=max.\n"
-        "- Decide based ONLY on the angiogram image.\n"
-        "- Output MUST contain NO spaces and NO extra words.\n"
-        "If you violate the format, output again correctly."
-    ),
-    # (p1) Two 5-way categorical ratings
-    (
-        "Output EXACTLY one line:\n"
-        "blur=LEVEL;motion=LEVEL;defocus=LEVEL\n"
-        "Rules:\n"
-        "- LEVEL MUST be exactly one of: A,B,C,D,E,F,G,H.\n"
-        "- A=very_low, B=low, C=mid, D=mid_high, E=high, F=very_high, G=extreme, H=max.\n"
-        "- Decide based ONLY on the angiogram image.\n"
-        "- Output MUST contain NO spaces and NO extra words.\n"
-        "If you violate the format, output again correctly."
-    ),
-    # (p2) 4-way dominant label
-    (
-        "Output EXACTLY one line:\n"
-        "dominant=LABEL;secondary=LABEL;confidence=LEVEL\n"
-        "Rules:\n"
-        "- LABEL MUST be exactly one of: A,B,C,D,E,F,G,H.\n"
-        "- Map labels to issues: A=contrast, B=fragmentation, C=clutter, D=blur, "
-        "E=low_snr, F=illumination, G=saturation, H=motion.\n"
         "- LEVEL MUST be exactly one of: A,B,C,D,E,F,G,H (A=very_low ... H=max).\n"
-        "- Choose the MOST dominant factor affecting vessel visibility for this image.\n"
+        "- LABEL MUST be exactly one of: low_contrast, motion, overlap, catheter, clutter, noise, blur, other.\n"
+        "- Decide based ONLY on the angiogram image.\n"
+        "- Output MUST contain NO spaces and NO extra words.\n"
+        "If you violate the format, output again correctly."
+    ),
+    # (p1) Non-vessel + FP risk + source (targeting false positives)
+    (
+        "Output EXACTLY one line:\n"
+        "nonvessel=LEVEL;fp_risk=LEVEL;source=LABEL\n"
+        "Rules:\n"
+        "- LEVEL MUST be exactly one of: A,B,C,D,E,F,G,H (A=very_low ... H=max).\n"
+        "- LABEL MUST be exactly one of: background, catheter, bone, saturation, texture, artifact, blur, other.\n"
+        "- Decide based ONLY on the angiogram image.\n"
+        "- Output MUST contain NO spaces and NO extra words.\n"
+        "If you violate the format, output again correctly."
+    ),
+    # (p2) Thin/periphery visibility (targeting thin-vessel continuity)
+    (
+        "Output EXACTLY one line:\n"
+        "thin=LEVEL;periphery=LEVEL;visibility=LEVEL\n"
+        "Rules:\n"
+        "- LEVEL MUST be exactly one of: A,B,C,D,E,F,G,H (A=very_low ... H=max).\n"
+        "- Decide based ONLY on the angiogram image.\n"
         "- Output MUST contain NO spaces and NO extra words.\n"
         "If you violate the format, output again correctly."
     ),
@@ -96,6 +94,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda")
     parser.add_argument("--device-map", type=str, default="auto", help="auto|none (use 'none' for single GPU)")
     parser.add_argument("--dtype", type=str, default="auto", help="auto|float16|bfloat16|float32")
+    parser.add_argument(
+        "--analysis-mode",
+        type=str,
+        default="logits",
+        choices=["logits", "text"],
+        help="logits: candidate-token logits features (default). text: text-embedding dispersion.",
+    )
+    parser.add_argument(
+        "--pred-ckpt",
+        type=str,
+        default=None,
+        help="Optional checkpoint to generate prediction mask overlays for VLM input.",
+    )
+    parser.add_argument(
+        "--pred-use-overlay",
+        action="store_true",
+        help="If set, use hard-mask overlay image as VLM input instead of raw angiogram.",
+    )
+    parser.add_argument(
+        "--overlay-alpha",
+        type=float,
+        default=0.5,
+        help="Alpha for overlay mask (0.0 = none, 1.0 = full red).",
+    )
+    parser.add_argument(
+        "--dump-overlays",
+        action="store_true",
+        help="Save overlay images actually fed to the VLM (requires --pred-use-overlay).",
+    )
+    parser.add_argument(
+        "--dump-overlays-max",
+        type=int,
+        default=50,
+        help="Max number of overlay images to save (0 = all).",
+    )
 
     parser.add_argument(
         "--feature-mode",
@@ -283,31 +316,31 @@ def _extract_answer_value_positions(answer: str, prompt_idx: int) -> Dict[str, i
     ans = answer.strip()
 
     if prompt_idx == 0:
-        m = re.fullmatch(r"contrast=([A-H]);fragmentation=([A-H]);thinness=([A-H])", ans)
+        m = re.fullmatch(r"continuity=([A-H]);breaks=([A-H]);cause=([a-z_]+)", ans)
         if not m:
             return {}
-        cpos = ans.find("contrast=") + len("contrast=")
-        fpos = ans.find("fragmentation=") + len("fragmentation=")
-        tpos = ans.find("thinness=") + len("thinness=")
-        return {"contrast": cpos, "fragmentation": fpos, "thinness": tpos}
+        cpos = ans.find("continuity=") + len("continuity=")
+        bpos = ans.find("breaks=") + len("breaks=")
+        pos = ans.find("cause=") + len("cause=")
+        return {"continuity": cpos, "breaks": bpos, "cause": pos}
 
     if prompt_idx == 1:
-        m = re.fullmatch(r"blur=([A-H]);motion=([A-H]);defocus=([A-H])", ans)
+        m = re.fullmatch(r"nonvessel=([A-H]);fp_risk=([A-H]);source=([a-z_]+)", ans)
         if not m:
             return {}
-        bpos = ans.find("blur=") + len("blur=")
-        mpos = ans.find("motion=") + len("motion=")
-        dpos = ans.find("defocus=") + len("defocus=")
-        return {"blur": bpos, "motion": mpos, "defocus": dpos}
+        npos = ans.find("nonvessel=") + len("nonvessel=")
+        fpos = ans.find("fp_risk=") + len("fp_risk=")
+        spos = ans.find("source=") + len("source=")
+        return {"nonvessel": npos, "fp_risk": fpos, "source": spos}
 
     if prompt_idx == 2:
-        m = re.fullmatch(r"dominant=([A-H]);secondary=([A-H]);confidence=([A-H])", ans)
+        m = re.fullmatch(r"thin=([A-H]);periphery=([A-H]);visibility=([A-H])", ans)
         if not m:
             return {}
-        dpos = ans.find("dominant=") + len("dominant=")
-        spos = ans.find("secondary=") + len("secondary=")
-        cpos = ans.find("confidence=") + len("confidence=")
-        return {"dominant": dpos, "secondary": spos, "confidence": cpos}
+        tpos = ans.find("thin=") + len("thin=")
+        ppos = ans.find("periphery=") + len("periphery=")
+        vpos = ans.find("visibility=") + len("visibility=")
+        return {"thin": tpos, "periphery": ppos, "visibility": vpos}
 
     return {}
 
@@ -369,11 +402,8 @@ def _p2_fallback_feature(
     """
     debug: Dict[str, str] = {"p2_fallback": fallback}
 
-    # p2 now has 3 fields: dominant (LABELS), secondary (LABELS), confidence (LEVELS)
-    K_dom = len(LABELS) + (1 if include_unknown else 0)
-    K_sec = len(LABELS) + (1 if include_unknown else 0)
-    K_conf = len(LEVELS)
-    K = K_dom + K_sec + K_conf
+    # p2 now has 3 fields: thin/periphery/visibility (LEVELS only)
+    K = 3 * len(LEVELS)
 
     if fallback == "prior" and prior_probs is not None and prior_probs.shape[0] == K:
         probs = prior_probs.copy()
@@ -384,13 +414,7 @@ def _p2_fallback_feature(
         else:
             debug["p2_fallback_used"] = fallback
 
-        if fallback == "unknown" and include_unknown:
-            probs = np.zeros((K,), dtype=np.float32)
-            # put UNK for dominant and secondary if enabled, otherwise uniform
-            probs[len(LABELS)] = 1.0  # dominant UNK
-            probs[len(LABELS) + (1 if include_unknown else 0) + len(LABELS)] = 1.0  # secondary UNK
-        else:
-            probs = np.ones((K,), dtype=np.float32) / float(K)
+        probs = np.ones((K,), dtype=np.float32) / float(K)
 
     if feature_mode == "logit":
         # For logit mode, return logits that correspond to the categorical distribution.
@@ -506,17 +530,33 @@ def extract_logits_feature(
 
     # Candidate sets per field
     cand_ids_map: Dict[str, List[int]] = {}
-    if prompt_idx in (0, 1):
-        cand_ids_map = {field: [_safe_single_token_id(tok, s) for s in LEVELS] for field in positions.keys()} if positions else {}
-    else:
-        # p2: dominant/secondary -> LABELS (+UNK), confidence -> LEVELS
+    if prompt_idx == 0:
+        # continuity/breaks use LEVELS, cause uses LABELS (+UNK)
         label_cands = list(LABELS) + ([UNK_LABEL] if p2_include_unknown else [])
         label_ids = [_safe_single_token_id(tok, s) for s in label_cands]
         level_ids = [_safe_single_token_id(tok, s) for s in LEVELS]
         cand_ids_map = {
-            "dominant": label_ids,
-            "secondary": label_ids,
-            "confidence": level_ids,
+            "continuity": level_ids,
+            "breaks": level_ids,
+            "cause": label_ids,
+        }
+    elif prompt_idx == 1:
+        # nonvessel/fp_risk use LEVELS, source uses LABELS_FP (+UNK)
+        label_cands = list(LABELS_FP) + ([UNK_LABEL] if p2_include_unknown else [])
+        label_ids = [_safe_single_token_id(tok, s) for s in label_cands]
+        level_ids = [_safe_single_token_id(tok, s) for s in LEVELS]
+        cand_ids_map = {
+            "nonvessel": level_ids,
+            "fp_risk": level_ids,
+            "source": label_ids,
+        }
+    else:
+        # p2: thin/periphery/visibility use LEVELS
+        level_ids = [_safe_single_token_id(tok, s) for s in LEVELS]
+        cand_ids_map = {
+            "thin": level_ids,
+            "periphery": level_ids,
+            "visibility": level_ids,
         }
 
     # If parsing failed, only p2 can fallback robustly
@@ -536,8 +576,9 @@ def extract_logits_feature(
             return feat, debug
         else:
             # For p0/p1, return a valid-length uniform feature (avoid shape mismatch)
-            # p0/p1 each have 3 fields, each with len(LEVELS) candidates.
-            K = 3 * len(LEVELS)
+            # p0/p1: 2x LEVELS + 1x LABELS (with optional UNK)
+            label_len = len(LABELS) + (1 if p2_include_unknown else 0)
+            K = 2 * len(LEVELS) + label_len
             probs = np.ones((K,), dtype=np.float32) / float(K)
             feat = np.log(np.clip(probs, 1e-12, 1.0)).astype(np.float32) if feature_mode != "logit" else np.log(
                 np.clip(probs, 1e-12, 1.0)
@@ -699,6 +740,143 @@ def _blur_score(gray: np.ndarray) -> float:
     return float(out.var())
 
 
+def _edge_density_proxy(gray: np.ndarray) -> float:
+    # Simple gradient magnitude mean as texture/edge proxy
+    kx = np.array([[1, 0, -1], [2, 0, -2], [1, 0, -1]], dtype=np.float32)
+    ky = np.array([[1, 2, 1], [0, 0, 0], [-1, -2, -1]], dtype=np.float32)
+    pad = np.pad(gray, 1, mode="edge")
+    h, w = gray.shape
+    gx = np.zeros_like(gray, dtype=np.float32)
+    gy = np.zeros_like(gray, dtype=np.float32)
+    for i in range(h):
+        for j in range(w):
+            patch = pad[i:i + 3, j:j + 3]
+            gx[i, j] = float((patch * kx).sum())
+            gy[i, j] = float((patch * ky).sum())
+    mag = np.sqrt(gx * gx + gy * gy)
+    return float(mag.mean())
+
+
+def _make_overlay_image(gray: np.ndarray, mask: np.ndarray, alpha: float = 0.5) -> Image.Image:
+    # gray: HxW in [0,1], mask: HxW in {0,1}
+    base = np.stack([gray, gray, gray], axis=-1)
+    red = np.zeros_like(base)
+    red[..., 0] = 1.0
+    overlay = base * (1.0 - alpha * mask[..., None]) + red * (alpha * mask[..., None])
+    overlay = np.clip(overlay, 0.0, 1.0)
+    return Image.fromarray((overlay * 255.0).astype(np.uint8))
+
+
+def _resize_mask_to(mask: np.ndarray, size: Tuple[int, int]) -> np.ndarray:
+    # size: (width, height)
+    if mask.shape[0] == size[1] and mask.shape[1] == size[0]:
+        return mask
+    mask_img = Image.fromarray((mask * 255.0).astype(np.uint8))
+    mask_img = mask_img.resize(size, Image.NEAREST)
+    out = np.asarray(mask_img, dtype=np.float32) / 255.0
+    return (out > 0.5).astype(np.float32)
+
+
+def _load_pred_model(ckpt_path: str, device: torch.device):
+    # Import FlowModelVLMFiLM lazily to avoid heavy imports when not needed
+    # Ensure loss registry is populated (needed for checkpoint hyperparams).
+    import src.losses  # noqa: F401
+    from src.archs.flow_model_vlm_film import FlowModelVLMFiLM
+    # torch>=2.6 defaults weights_only=True; this ckpt needs full load.
+    model = FlowModelVLMFiLM.load_from_checkpoint(
+        ckpt_path,
+        map_location=device,
+        weights_only=False,
+    )
+    model.eval()
+    model.to(device)
+    return model
+
+
+@torch.no_grad()
+def _predict_hard_mask(model, image: Image.Image) -> np.ndarray:
+    # image -> tensor [1,1,H,W] in [0,1], resized to model.hparams.image_size if present
+    size = int(getattr(model.hparams, "image_size", image.size[0]))
+    if image.size[0] != size or image.size[1] != size:
+        image = image.resize((size, size), Image.BILINEAR)
+    gray = np.asarray(image.convert("L"), dtype=np.float32) / 255.0
+    x = torch.from_numpy(gray).unsqueeze(0).unsqueeze(0).to(next(model.parameters()).device)
+    if getattr(model.hparams, "use_sliding_infer", True):
+        prob = model._infer_sliding_dfm(x)
+    else:
+        prob = model._infer_full(x)
+    prob = torch.clamp(prob, 0.0, 1.0)
+    mask = (prob > 0.5).float()
+    return mask.squeeze(0).squeeze(0).detach().cpu().numpy()
+
+
+def _prepare_vlm_image(
+    image: Image.Image,
+    pred_model,
+    use_overlay: bool,
+    overlay_alpha: float = 0.5,
+) -> Image.Image:
+    if pred_model is None or not use_overlay:
+        return image
+    mask = _predict_hard_mask(pred_model, image)
+    mask = _resize_mask_to(mask, image.size)
+    gray = np.asarray(image.convert("L"), dtype=np.float32) / 255.0
+    overlay = _make_overlay_image(gray, mask, alpha=overlay_alpha)
+    return overlay.convert("RGB")
+
+
+@torch.inference_mode()
+def embed_text_tokens_only(
+    vlm: "QwenVLMTextGenerator",
+    text: str,
+    pool: str = "mean",
+) -> torch.Tensor:
+    """
+    Embed ONLY the generated answer text using the language model's hidden states.
+    pool="mean": mean over non-pad tokens
+    pool="last": last non-pad token (prefers EOS if present)
+    """
+    vlm._load_model()
+    tokenizer = getattr(vlm._processor, "tokenizer", vlm._processor)
+    tokens = tokenizer(text, return_tensors="pt", padding=True, truncation=True)
+
+    text_model = getattr(vlm._model, "language_model", None)
+    if text_model is None:
+        text_model = getattr(vlm._model, "model", vlm._model)
+
+    try:
+        text_device = next(text_model.parameters()).device
+    except StopIteration:
+        text_device = vlm.device
+
+    tokens = {k: v.to(text_device) for k, v in tokens.items()}
+    outputs = text_model(**tokens, output_hidden_states=True, return_dict=True)
+    hidden = outputs.hidden_states[-1] if hasattr(outputs, "hidden_states") else outputs.last_hidden_state
+    mask = tokens.get("attention_mask")
+    if mask is None:
+        mask = torch.ones(hidden.shape[:2], device=hidden.device, dtype=hidden.dtype)
+    else:
+        mask = mask.to(hidden.device)
+    mask = mask.unsqueeze(-1)
+
+    if pool == "last":
+        idx = (mask.squeeze(-1).sum(dim=1) - 1).clamp(min=0).long()
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_id is not None and "input_ids" in tokens:
+            input_ids = tokens["input_ids"]
+            eos_positions = (input_ids == eos_id).long()
+            has_eos = eos_positions.sum(dim=1) > 0
+            if has_eos.any():
+                last_eos = eos_positions.cumsum(dim=1).eq(eos_positions.sum(dim=1, keepdim=True))
+                last_eos_idx = last_eos.float().argmax(dim=1)
+                idx = torch.where(has_eos, last_eos_idx, idx)
+        pooled = hidden[torch.arange(hidden.size(0), device=hidden.device), idx]
+    else:
+        denom = mask.sum(dim=1).clamp(min=1.0)
+        pooled = (hidden * mask).sum(dim=1) / denom
+    return pooled
+
+
 def main() -> None:
     args = parse_args()
     if getattr(args, "center_l2", False):
@@ -707,8 +885,8 @@ def main() -> None:
     device = resolve_device(args.device)
 
     prompts = load_prompts(args)
-    if len(prompts) < 2:
-        raise ValueError("Provide at least two prompts for similarity analysis.")
+    if args.analysis_mode == "logits" and len(prompts) < 2:
+        raise ValueError("Provide at least two prompts for logits-feature analysis.")
 
     image_dir = Path(args.image_dir)
     image_paths = sorted(image_dir.glob(args.pattern))
@@ -721,8 +899,16 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "per_sample").mkdir(parents=True, exist_ok=True)
     (output_dir / "prompts.txt").write_text("\n".join(prompts), encoding="utf-8")
+    overlay_dir = None
+    if args.dump_overlays:
+        overlay_dir = output_dir / "overlays"
+        overlay_dir.mkdir(parents=True, exist_ok=True)
+    overlay_dumped = 0
 
     device_map = None if args.device_map == "none" else args.device_map
+
+    if args.pred_use_overlay and not args.pred_ckpt:
+        raise ValueError("--pred-use-overlay requires --pred-ckpt.")
 
     vlm = QwenVLMTextGenerator(
         model_name=args.model_name,
@@ -732,8 +918,74 @@ def main() -> None:
     )
     vlm._load_model()
 
+    pred_model = None
+    if args.pred_use_overlay:
+        pred_model = _load_pred_model(args.pred_ckpt, device)
+
     labels = [f"p{i}" for i in range(len(prompts))]
     sample_labels = [p.stem for p in image_paths]
+
+    if args.analysis_mode == "text":
+        # Text-embedding dispersion analysis (single or multi-prompt)
+        responses_path = output_dir / "responses.jsonl"
+        all_embs_by_prompt: List[List[np.ndarray]] = [[] for _ in range(len(prompts))]
+
+        with responses_path.open("w", encoding="utf-8") as f_out:
+            for img_path in tqdm(image_paths, desc="Images"):
+                image = Image.open(img_path).convert("RGB")
+                image_for_vlm = _prepare_vlm_image(
+                    image,
+                    pred_model,
+                    args.pred_use_overlay,
+                    overlay_alpha=args.overlay_alpha,
+                )
+                if args.dump_overlays and args.pred_use_overlay and overlay_dir is not None:
+                    if args.dump_overlays_max <= 0 or overlay_dumped < args.dump_overlays_max:
+                        raw_out = overlay_dir / f"{img_path.stem}_raw.png"
+                        overlay_out = overlay_dir / f"{img_path.stem}_overlay.png"
+                        image.convert("RGB").save(raw_out)
+                        image_for_vlm.convert("RGB").save(overlay_out)
+                        overlay_dumped += 1
+                for prompt_idx, prompt in enumerate(prompts):
+                    text = vlm.generate_text(image_for_vlm, prompt).strip()
+                    e_text = embed_text_tokens_only(vlm, text, pool="mean").float().cpu().numpy().squeeze()
+                    all_embs_by_prompt[prompt_idx].append(e_text)
+                    f_out.write(
+                        json.dumps(
+                            {
+                                "image": img_path.name,
+                                "prompt_idx": prompt_idx,
+                                "prompt": prompt,
+                                "text": text,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+
+        summary = []
+        for pidx in range(len(prompts)):
+            X = np.stack(all_embs_by_prompt[pidx], axis=0).astype(np.float32)
+            sim = safe_cosine_similarity_matrix(X)
+            write_matrix_csv(output_dir / f"prompt_{pidx}_sample_text_cosine.csv", sample_labels, sim)
+            n = sim.shape[0]
+            off = sim[~np.eye(n, dtype=bool)]
+            summary.append(
+                {
+                    "prompt_idx": pidx,
+                    "prompt_label": labels[pidx],
+                    "mean_offdiag_cosine": float(off.mean()) if off.size else float("nan"),
+                    "std_offdiag_cosine": float(off.std()) if off.size else float("nan"),
+                    "min_offdiag_cosine": float(off.min()) if off.size else float("nan"),
+                    "max_offdiag_cosine": float(off.max()) if off.size else float("nan"),
+                }
+            )
+        (output_dir / "summary_text_embed.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"[OK] Saved text-embed summary to: {output_dir / 'summary_text_embed.json'}")
+        return
 
     # Variable-dim features per prompt
     all_feats_by_prompt: List[List[np.ndarray]] = [[] for _ in range(len(prompts))]
@@ -742,51 +994,41 @@ def main() -> None:
     responses_path = output_dir / "responses.jsonl"
     feat_debug_path = output_dir / "feature_debug.jsonl"
 
-    # For p2 prior fallback, we collect empirical label frequencies from parsed p2 texts (best-effort).
-    p2_label_counts = {k: 0 for k in LABELS}
-    p2_total_parsed = 0
-
     with responses_path.open("w", encoding="utf-8") as f_out, feat_debug_path.open("w", encoding="utf-8") as f_dbg:
         for img_path in tqdm(image_paths, desc="Images"):
             image = Image.open(img_path).convert("RGB")
+            image_for_vlm = _prepare_vlm_image(
+                image,
+                pred_model,
+                args.pred_use_overlay,
+                overlay_alpha=args.overlay_alpha,
+            )
+            if args.dump_overlays and args.pred_use_overlay and overlay_dir is not None:
+                if args.dump_overlays_max <= 0 or overlay_dumped < args.dump_overlays_max:
+                    raw_out = overlay_dir / f"{img_path.stem}_raw.png"
+                    overlay_out = overlay_dir / f"{img_path.stem}_overlay.png"
+                    image.convert("RGB").save(raw_out)
+                    image_for_vlm.convert("RGB").save(overlay_out)
+                    overlay_dumped += 1
             texts: List[str] = []
             feats: List[np.ndarray] = []
 
             for prompt_idx, prompt in enumerate(prompts):
                 # 1) generate short answer
-                text = vlm.generate_text(image, prompt).strip()
+                text = vlm.generate_text(image_for_vlm, prompt).strip()
                 texts.append(text)
                 all_texts_by_prompt[prompt_idx].append(text)
 
                 # Track p2 empirical prior from parsed outputs
-                if prompt_idx == 2:
-                    m = re.fullmatch(r"dominant=([A-H]);secondary=([A-H]);confidence=([A-H])", text.strip())
-                    if m:
-                        p2_label_counts[m.group(1)] += 1
-                        p2_total_parsed += 1
+                # No p2 prior collection for this prompt set
 
-                # Build p2 prior probs if requested and available
+                # Build p2 prior probs if requested and available (disabled for this prompt set)
                 p2_prior_probs = None
-                if args.p2_fallback == "prior":
-                    K = len(LABELS) + (1 if args.p2_include_unknown else 0)
-                    if p2_total_parsed > 0:
-                        probs = np.zeros((K,), dtype=np.float32)
-                        for i, lab in enumerate(LABELS):
-                            probs[i] = p2_label_counts[lab] / float(p2_total_parsed)
-                        if args.p2_include_unknown:
-                            probs[-1] = 0.0
-                        # renorm safely
-                        s = probs.sum()
-                        if s > 0:
-                            probs = probs / s
-                        else:
-                            probs[:] = 1.0 / float(K)
-                        p2_prior_probs = probs
 
                 # 2) teacher-forcing logits feature extraction (Design A with fixes)
                 feat, dbg = extract_logits_feature(
                     vlm=vlm,
-                    image=image,
+                    image=image_for_vlm,
                     prompt=prompt,
                     answer=text,
                     prompt_idx=prompt_idx,
@@ -927,6 +1169,7 @@ def main() -> None:
     contrast_range = []
     snr_proxy = []
     blur_var = []
+    edge_density = []
     for img_path in image_paths:
         im = Image.open(img_path).convert("L")
         gray = np.asarray(im, dtype=np.float32) / 255.0
@@ -934,9 +1177,11 @@ def main() -> None:
         contrast_range.append(c_range)
         snr_proxy.append(snr)
         blur_var.append(_blur_score(gray))
+        edge_density.append(_edge_density_proxy(gray))
     contrast_range = np.array(contrast_range, dtype=np.float32)
     snr_proxy = np.array(snr_proxy, dtype=np.float32)
     blur_var = np.array(blur_var, dtype=np.float32)
+    edge_density = np.array(edge_density, dtype=np.float32)
 
     def _expected_level(field_vec: np.ndarray) -> np.ndarray:
         if field_vec.shape[1] == 0:
@@ -962,13 +1207,14 @@ def main() -> None:
             }
         )
     if p1_raw is not None and p1_raw.shape[1] >= 24:
-        p1_blur = _expected_level(p1_raw[:, 0:8])
+        # p1 fields: nonvessel(0:8), fp_risk(8:16), source(16:24+)
+        p1_fp_risk = _expected_level(p1_raw[:, 8:16])
         corr_out.append(
             {
                 "prompt": "p1",
-                "field": "blur",
-                "corr_pearson_blurvar": _pearson(p1_blur, blur_var),
-                "corr_spearman_blurvar": _spearman(p1_blur, blur_var),
+                "field": "fp_risk",
+                "corr_pearson_edge": _pearson(p1_fp_risk, edge_density),
+                "corr_spearman_edge": _spearman(p1_fp_risk, edge_density),
             }
         )
     (output_dir / "feature_quality_corr.json").write_text(
@@ -1035,18 +1281,7 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    # Save p2 prior stats
-    (output_dir / "p2_prior_stats.json").write_text(
-        json.dumps(
-            {
-                "p2_total_parsed": int(p2_total_parsed),
-                "p2_label_counts": p2_label_counts,
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    # Save p2 prior stats (disabled for this prompt set)
 
     print(f"[OK] Saved responses to: {responses_path}")
     print(f"[OK] Saved feature debug to: {feat_debug_path}")

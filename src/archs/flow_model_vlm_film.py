@@ -196,6 +196,7 @@ class FlowModelVLMFiLM(L.LightningModule):
                 cond_dim=vlm_config.get("cond_dim", 256),
                 cache_dir=vlm_config.get("cache_dir", "cache/vlm_profiles"),
                 prompt_template=vlm_config.get("prompt_template"),
+                prompt_templates=vlm_config.get("prompt_templates"),
                 dtype=vlm_config.get("dtype", "auto"),
                 device_map=vlm_config.get("device_map", "auto"),
                 max_new_tokens=vlm_config.get("max_new_tokens", 48),
@@ -203,6 +204,18 @@ class FlowModelVLMFiLM(L.LightningModule):
                 text_mlp_hidden_dim=vlm_config.get("text_mlp_hidden_dim", 256),
                 embedding_dtype=vlm_config.get("embedding_dtype", "float16"),
                 use_text_prompt_cond=vlm_config.get("use_text_prompt_cond", False),
+                use_logits_feature_cond=vlm_config.get("use_logits_feature_cond", False),
+                logits_feature_mode=vlm_config.get("logits_feature_mode", "logprob"),
+                logits_logit_temp=vlm_config.get("logits_logit_temp", 1.0),
+                logits_include_unknown=vlm_config.get("logits_include_unknown", True),
+                logits_center=vlm_config.get("logits_center", False),
+                logits_l2norm=vlm_config.get("logits_l2norm", False),
+                p2_fallback=vlm_config.get("p2_fallback", "uniform"),
+                p2_prior_probs=vlm_config.get("p2_prior_probs", None),
+                vlm_response_debug_enabled=vlm_config.get("vlm_response_debug_enabled", False),
+                vlm_response_debug_every_n_steps=vlm_config.get("vlm_response_debug_every_n_steps", 50),
+                input_mode=vlm_config.get("input_mode", "raw"),
+                overlay_alpha=vlm_config.get("overlay_alpha", 0.5),
                 verbose=vlm_config.get("verbose", False),
                 verbose_debug=vlm_config.get("verbose_debug", False),
                 update_interval_steps_train=vlm_config.get("update_interval_steps_train", 100),
@@ -213,6 +226,11 @@ class FlowModelVLMFiLM(L.LightningModule):
                 vlm_cache_stats_enabled=vlm_config.get("vlm_cache_stats_enabled", False),
                 vlm_cache_stats_every_n_steps=vlm_config.get("vlm_cache_stats_every_n_steps", 200),
             )
+            self._vlm_input_mode = str(vlm_config.get("input_mode", "raw")).lower()
+            self._vlm_overlay_alpha = float(vlm_config.get("overlay_alpha", 0.5))
+            self._vlm_pred_threshold = float(vlm_config.get("pred_threshold", 0.5))
+            self._vlm_pred_update_interval = int(vlm_config.get("pred_update_interval_steps", 5))
+            self._vlm_pred_warmup_epochs = int(vlm_config.get("pred_warmup_epochs", 20))
             decoder_channels = [model_channels * m for m in channel_mult][::-1]
             
             # Select decoder stages to apply VLM-FiLM
@@ -251,6 +269,11 @@ class FlowModelVLMFiLM(L.LightningModule):
             self.vlm_film_conditioner = None
             self.vlm_film_heads = None
             self._vlm_film_stage_indices = None
+            self._vlm_input_mode = "raw"
+            self._vlm_overlay_alpha = 0.5
+            self._vlm_pred_threshold = 0.5
+            self._vlm_pred_update_interval = 0
+            self._vlm_pred_warmup_epochs = 0
 
         # Junction-aware FiLM gating configuration
         self.junction_gating_config = junction_gating_config
@@ -320,6 +343,20 @@ class FlowModelVLMFiLM(L.LightningModule):
 
         # Register lightweight summary module so logs show loss info.
         self.loss_summary = _LossSummaryModule(self.loss_description)
+        # Optional topology-aware loss (DFM binary)
+        self.use_topo_loss = False
+        self.topo_loss = None
+        topo_cfg = getattr(self.hparams, "topo_loss", None)
+        if topo_cfg and topo_cfg.get("enabled", False):
+            try:
+                from src.losses import TopoLoss
+                topo_params = dict(topo_cfg)
+                topo_params.pop("enabled", None)
+                self.topo_loss = TopoLoss(**topo_params)
+                self.use_topo_loss = True
+                print(f"[TopoLoss] enabled with params: {topo_params}")
+            except Exception as e:
+                print(f"[TopoLoss] init failed, disabling topo loss: {e}")
 
         # Buffer for distributed image logging (validation/test).
         self._pending_image_logs: list[dict] = []
@@ -401,6 +438,97 @@ class FlowModelVLMFiLM(L.LightningModule):
                 self._logged_stage_indices = True
         return vlm_cond
 
+    def _vlm_warmup_active(self) -> bool:
+        return bool(self._vlm_pred_warmup_epochs > 0 and self.current_epoch < self._vlm_pred_warmup_epochs)
+
+    def _build_vlm_batch(self, batch: dict | None, mode_suffix: str | None = None, pred_mask: torch.Tensor | None = None) -> dict | None:
+        if isinstance(batch, dict):
+            batch_vlm = dict(batch)
+        else:
+            batch_vlm = {}
+        if mode_suffix:
+            batch_vlm["vlm_cache_suffix"] = mode_suffix
+        if pred_mask is not None:
+            batch_vlm["vlm_pred_mask"] = pred_mask
+        return batch_vlm if batch_vlm else batch
+
+    @torch.no_grad()
+    def _compute_pred_mask_for_vlm(
+        self,
+        xt: torch.Tensor,
+        t: torch.Tensor,
+        images: torch.Tensor,
+    ) -> torch.Tensor:
+        # Fast prediction pass without VLM conditioning
+        prev_use_vlm = self.use_vlm_film
+        self.use_vlm_film = False
+        try:
+            logits = self.unet(xt, t, images)
+        finally:
+            self.use_vlm_film = prev_use_vlm
+        if self.use_geometry_head:
+            logits = logits[:, 1:2, :, :]
+        prob = torch.sigmoid(logits)
+        return (prob > self._vlm_pred_threshold).float()
+
+    @torch.no_grad()
+    def _compute_pred_mask_eval(self, images: torch.Tensor) -> torch.Tensor:
+        # Full prediction pass (no VLM) for val/test mask
+        prev_use_vlm = self.use_vlm_film
+        self.use_vlm_film = False
+        try:
+            if getattr(self.hparams, 'use_sliding_infer', True):
+                output_geometry = self._sliding_window_predict(images, vlm_cond=None)
+            else:
+                output_geometry = self.sample(None, images, vlm_cond=None)
+        finally:
+            self.use_vlm_film = prev_use_vlm
+        if output_geometry.dim() == 4 and output_geometry.shape[1] == 1:
+            output_geometry = output_geometry[:, 0:1]
+        prob = torch.clamp(output_geometry, 0.0, 1.0)
+        return (prob > self._vlm_pred_threshold).float()
+
+    def _maybe_get_vlm_cond_train(
+        self,
+        images: torch.Tensor,
+        batch: dict | None,
+        xt: torch.Tensor,
+        t: torch.Tensor,
+    ) -> dict | None:
+        if not self.use_vlm_film or self.vlm_film_conditioner is None or self.vlm_film_heads is None:
+            return None
+        if self._vlm_warmup_active():
+            return None
+        mode = self._vlm_input_mode
+        mode_suffix = f"vlm:{mode}"
+
+        if mode in {"overlay", "mask_only"}:
+            step = int(self.global_step)
+            interval = max(1, int(self._vlm_pred_update_interval))
+            use_overlay = (step % interval) == 0
+            pred_mask = self._compute_pred_mask_for_vlm(xt, t, images) if use_overlay else None
+            batch_vlm = self._build_vlm_batch(batch, mode_suffix=mode_suffix, pred_mask=pred_mask)
+            return self._get_vlm_film_cond(images, batch_vlm)
+
+        batch_vlm = self._build_vlm_batch(batch, mode_suffix=mode_suffix, pred_mask=None)
+        return self._get_vlm_film_cond(images, batch_vlm)
+
+    def _maybe_get_vlm_cond_eval(self, images: torch.Tensor, batch: dict | None) -> dict | None:
+        if not self.use_vlm_film or self.vlm_film_conditioner is None or self.vlm_film_heads is None:
+            return None
+        if self._vlm_warmup_active():
+            return None
+        mode = self._vlm_input_mode
+        mode_suffix = f"vlm:{mode}"
+
+        if mode in {"overlay", "mask_only"}:
+            pred_mask = self._compute_pred_mask_eval(images)
+            batch_vlm = self._build_vlm_batch(batch, mode_suffix=mode_suffix, pred_mask=pred_mask)
+            return self._get_vlm_film_cond(images, batch_vlm)
+
+        batch_vlm = self._build_vlm_batch(batch, mode_suffix=mode_suffix, pred_mask=None)
+        return self._get_vlm_film_cond(images, batch_vlm)
+
     def _compute_junction_gate(self, mask: torch.Tensor) -> torch.Tensor | None:
         if mask is None:
             return None
@@ -416,11 +544,13 @@ class FlowModelVLMFiLM(L.LightningModule):
         batch: dict | None = None,
         vlm_cond: dict | None = None,
         gt_mask: torch.Tensor | None = None,
+        force_no_vlm: bool = False,
     ) -> torch.Tensor:
-        if not self.use_vlm_film or self.vlm_film_conditioner is None or self.vlm_film_heads is None:
+        if force_no_vlm or not self.use_vlm_film or self.vlm_film_conditioner is None or self.vlm_film_heads is None:
             return self.unet(x, t, images)
         if vlm_cond is None:
-            vlm_cond = self._get_vlm_film_cond(images, batch)
+            if not self._vlm_warmup_active():
+                vlm_cond = self._get_vlm_film_cond(images, batch)
         
         # Add junction gating config to vlm_cond if enabled
         if vlm_cond is not None and hasattr(self, 'junction_gating_config') and self.junction_gating_config is not None:
@@ -781,8 +911,16 @@ class FlowModelVLMFiLM(L.LightningModule):
                     )
         
         # UNet forward: (x=xt, time=t, cond=images)
-        vlm_film_cond = self._get_vlm_film_cond(images, batch)
-        unet_out = self._unet_forward(xt, t, images, batch=batch, vlm_cond=vlm_film_cond)
+        warmup_off = self._vlm_warmup_active()
+        vlm_film_cond = self._maybe_get_vlm_cond_train(images, batch, xt, t)
+        unet_out = self._unet_forward(
+            xt,
+            t,
+            images,
+            batch=batch,
+            vlm_cond=vlm_film_cond,
+            force_no_vlm=warmup_off,
+        )
         if self.use_geometry_head:
             v = unet_out[:, 0:1, :, :]
             geometry_pred = unet_out[:, 1:2, :, :]
@@ -864,7 +1002,8 @@ class FlowModelVLMFiLM(L.LightningModule):
         x1, images = random_patch_batch([x1, images], patch_size, num_patches)
 
         t, xt, x0 = make_xt_binary(x1)
-        vlm_film_cond = self._get_vlm_film_cond(images, batch)
+        warmup_off = self._vlm_warmup_active()
+        vlm_film_cond = self._maybe_get_vlm_cond_train(images, batch, xt, t)
         
         # Pass gt_mask for junction gating if source='gt'
         gt_mask_for_gating = None
@@ -872,10 +1011,26 @@ class FlowModelVLMFiLM(L.LightningModule):
             if self.junction_gating_config.get('source') == 'gt':
                 gt_mask_for_gating = x1
         
-        unet_out = self._unet_forward(xt, t, images, batch=batch, vlm_cond=vlm_film_cond, gt_mask=gt_mask_for_gating)
+        unet_out = self._unet_forward(
+            xt,
+            t,
+            images,
+            batch=batch,
+            vlm_cond=vlm_film_cond,
+            gt_mask=gt_mask_for_gating,
+            force_no_vlm=warmup_off,
+        )
         logits = unet_out[:, 1:2, :, :] if self.use_geometry_head else unet_out
 
         loss, loss_dict = loss_dfm_binary(logits, x1)
+
+        # Topology-aware loss (optional)
+        if self.use_topo_loss and self.topo_loss is not None:
+            # Convert binary logits to 2-class logits for TopoLoss (expects softmax over class dim)
+            logits_2 = torch.cat([-logits, logits], dim=1)
+            topo_loss = self.topo_loss(logits_2, x1.squeeze(1))
+            loss = loss + topo_loss
+            self.log('train/topo_loss', topo_loss, prog_bar=False, sync_dist=True)
 
         # Self-consistency loss (velocity-based): enforce straight flows.
         if torch.rand((), device=x1.device).item() < 0.2:
@@ -1152,7 +1307,7 @@ class FlowModelVLMFiLM(L.LightningModule):
                 sampler = sampler_dfm_heun
             eps = float(getattr(self.hparams, 'dfm_eps', 1e-6))
             if vlm_cond is None and self.use_vlm_film:
-                vlm_cond = self._get_vlm_film_cond(images, batch=None)
+                vlm_cond = self._maybe_get_vlm_cond_eval(images, batch=None)
             return sampler(
                 lambda xt, t, cond: self._dfm_logits(xt, t, cond, vlm_cond=vlm_cond),
                 images,
@@ -1189,7 +1344,7 @@ class FlowModelVLMFiLM(L.LightningModule):
         matching the training behavior.
         """
         # Extract VLM conditioning if enabled (same as training)
-        if vlm_cond is None and self.use_vlm_film:
+        if vlm_cond is None and self.use_vlm_film and not self._vlm_warmup_active():
             vlm_cond = self._get_vlm_film_cond(images, batch=batch)
         unet_out = self._unet_forward(xt, t, images, batch=batch, vlm_cond=vlm_cond)
         if self.use_geometry_head:
@@ -1316,7 +1471,7 @@ class FlowModelVLMFiLM(L.LightningModule):
             output_geometry_list = []
             for _ in range(self.hparams.num_ensemble):
                 if getattr(self.hparams, 'use_sliding_infer', True):
-                    vlm_cond = self._get_vlm_film_cond(images, batch) if self.use_vlm_film else None
+                    vlm_cond = self._maybe_get_vlm_cond_eval(images, batch) if self.use_vlm_film else None
                     output_geometry = self._sliding_window_predict(images, vlm_cond=vlm_cond)
                 else:
                     output_geometry = self.sample(None, images)
@@ -1324,7 +1479,7 @@ class FlowModelVLMFiLM(L.LightningModule):
             output_geometry = torch.stack(output_geometry_list).mean(dim=0)
         else:
             if getattr(self.hparams, 'use_sliding_infer', True):
-                vlm_cond = self._get_vlm_film_cond(images, batch) if self.use_vlm_film else None
+                vlm_cond = self._maybe_get_vlm_cond_eval(images, batch) if self.use_vlm_film else None
                 output_geometry = self._sliding_window_predict(images, vlm_cond=vlm_cond)
             else:
                 output_geometry = self.sample(None, images)
